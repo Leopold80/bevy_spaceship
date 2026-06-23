@@ -1,15 +1,15 @@
 # Bevy Spacecraft
 
-Apollo-style lunar module visualization and quaternion attitude-control experiments in Bevy.
+基于 Bevy 的 Apollo 风格登月舱可视化，以及四元数姿态控制实验。
 
-## Branches
+## 分支
 
-- `main`: baseline Apollo-style lunar module scene.
-- `experiment/quaternion-attitude-control`: kinematic quaternion attitude-control demo with logs and visual verification.
+- `main`：基础的 Apollo 风格登月舱场景。
+- `experiment/quaternion-attitude-control`：运动学四元数姿态控制演示，包含日志记录和可视化验证。
 
-## Quaternion Attitude-Control Demo
+## 四元数姿态控制演示
 
-The experiment branch validates the simplified kinematic outer-loop law:
+实验分支用于验证如下简化的运动学外环控制律：
 
 ```text
 q_e = q_d^-1 * q
@@ -17,70 +17,69 @@ if q_e0 < 0, q_e = -q_e
 omega_c = -kp * q_e0 * q_ev
 ```
 
-The implementation intentionally models only kinematics. It does not include rigid-body dynamics,
-inertia, actuator torque, saturation, or an inner angular-rate loop.
+该实现有意只建模运动学部分。它不包含刚体动力学、转动惯量、执行器力矩、饱和约束，也不包含内层角速度控制环。
 
-## Run
+## 运行
 
 ```bash
 cargo run
 ```
 
-Controls in the visual demo:
+可视化演示中的控制按键：
 
-- `Space` or `R`: reset the current scenario.
-- `1`, `2`, `3`: switch between repeatable initial attitude scenarios.
-- `P`: pause or resume convergence.
+- `Space` 或 `R`：重置当前场景。
+- `1`、`2`、`3`：在几个可重复的初始姿态场景之间切换。
+- `P`：暂停或继续收敛过程。
 
-The right-side overlay shows two coordinate frames at the same origin:
+右侧叠加显示区域会在同一个原点处显示两个坐标系：
 
-- Thick frame: desired attitude `q_d`.
-- Thin translucent frame: current attitude `q`.
+- 粗坐标系：期望姿态 `q_d`。
+- 半透明细坐标系：当前姿态 `q`。
 
-As the controller converges, the current frame should overlap the desired frame.
+随着控制器收敛，当前坐标系应逐渐与期望坐标系重合。
 
-## Headless Log Verification
+## 无图形界面的日志验证
 
-Use the headless mode when GPU rendering is unavailable:
+当无法使用 GPU 渲染时，可以使用无图形界面模式：
 
 ```bash
 cargo run -- --headless-log
 ```
 
-This writes:
+该命令会写入：
 
 ```text
 logs/attitude_kinematics.csv
 ```
 
-Expected trends:
+期望的变化趋势：
 
-- `qe0 >= 0`, showing unwind avoidance.
-- `qev_norm` decreases toward zero.
-- `error_angle_rad` decreases toward zero.
-- `omega_norm` decreases as the error shrinks.
+- `qe0 >= 0`，说明实现了 unwinding 避免机制。
+- `qev_norm` 逐渐减小并趋近于零。
+- `error_angle_rad` 逐渐减小并趋近于零。
+- `omega_norm` 随着误差缩小而减小。
 
-## Theory Notes
+## 理论说明
 
-The corrected derivation is kept in:
+修正后的推导保存在：
 
 ```text
 docs/quaternion_attitude_control.md
 ```
 
-The Bevy-independent control code is in:
+与 Bevy 无关的控制代码位于：
 
 ```text
 src/attitude_control.rs
 ```
 
-The scene, controls, HUD, logging, and coordinate-frame visualization are in:
+场景、控制按键、HUD、日志记录和坐标系可视化位于：
 
 ```text
 src/main.rs
 ```
 
-## Checks
+## 检查
 
 ```bash
 cargo fmt --check
