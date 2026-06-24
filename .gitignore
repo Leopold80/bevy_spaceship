@@ -1,4 +1,4 @@
 /target/
 /logs/*.csv
 .DS_Store
-/.local/
+
