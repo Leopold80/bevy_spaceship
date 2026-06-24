@@ -95,6 +95,86 @@ source scripts/mujoco_env.zsh
 
 Apollo 模型现在以 `src/apollo_spec.rs` 中的 Rust 部件规格作为单一来源。Bevy 的 Apollo 可视化模型和 MuJoCo MJCF 都由这份规格生成，避免维护两套尺寸和坐标。第一版 MuJoCo 模型使用零重力、一个 freejoint 刚体，以及 body-frame 6D 外力/力矩输入。
 
+## TODO：将 MuJoCo 仿真/控制步长与 Bevy 渲染帧时间解耦
+
+当前的 MuJoCo-Bevy 联合方式主要面向实时可视化 demo。在 `mujoco_apollo_demo` 中，MuJoCo 的仿真推进依赖 Bevy 每一帧的 `delta time`，随后再把 MuJoCo 状态同步到 Bevy 的可视模型上。这样做适合快速演示，因为屏幕上的运动大致跟随真实时间。
+
+但是，这种设计不适合严格的控制算法验证。
+
+对于控制系统仿真，被控对象应当具有明确、固定的离散时间推进方式：
+
+```text
+x[k+1] = F(x[k], u[k], Δt)
+```
+
+其中仿真步长或控制步长 `Δt` 应该由控制实验本身定义，而不应该由渲染帧率决定。控制算法的效果不应依赖 GPU 负载、窗口刷新率、操作系统调度或临时卡顿。
+
+如果直接用 Bevy 的帧时间推进 MuJoCo，那么同一个控制输入在不同机器、不同帧率，甚至同一次运行中的不同帧上，都会作用不同的物理时间。这会导致控制实验的可重复性下降，并且把被控对象动力学错误地耦合到可视化后端上。
+
+后续应当区分三种时间尺度：
+
+```text
+1. MuJoCo 仿真步长
+   较小且固定的物理积分步长，例如 0.001 s 或 0.002 s。
+
+2. 控制器更新步长
+   固定的控制输入更新周期，例如 0.01 s 或 0.02 s。
+
+3. Bevy 渲染帧时间
+   可变的显示刷新时间，只用于画面更新，不参与定义物理系统。
+```
+
+例如，后续控制实验可以采用：
+
+```text
+MuJoCo simulation dt:   0.002 s
+Controller dt:          0.020 s
+Control hold:           10 个 MuJoCo 小步 / 1 个控制周期
+```
+
+也就是说，每次控制器更新控制输入 `u[k]` 后，应当在固定数量的 MuJoCo 小步内保持该输入：
+
+```text
+state = read_mujoco_state()
+control = controller(state, reference)
+
+for _ in 0..control_hold:
+    apply_control(control)
+    mujoco_step_fixed_dt()
+
+next_state = read_mujoco_state()
+```
+
+在严格控制实验模式下，Bevy 不应该驱动物理时间。Bevy 应该只读取 MuJoCo 的最新状态，并更新飞行器可视模型的 `Transform`。
+
+推荐后续结构：
+
+```text
+src/mujoco_dynamics.rs
+    MuJoCo 底层动力学封装。
+    负责 reset、固定步长积分、施加外力/力矩或执行器输入、
+    读取位置、姿态、速度和角速度等状态。
+
+src/control_env.rs
+    控制实验环境封装。
+    负责固定控制步长、控制输入保持、参考信号生成、
+    状态记录、误差计算和实验 reset。
+
+src/bin/mujoco_apollo_demo.rs
+    实时 Bevy 可视化 demo。
+    可以继续使用 wall-clock time，用于交互式演示和模型观察。
+
+src/bin/control_headless_demo.rs
+    无窗口固定步长控制实验。
+    不依赖 Bevy，用来验证控制算法、记录数据和检查可重复性。
+
+src/bin/control_visual_demo.rs
+    可选的控制可视化模式。
+    固定步长控制实验作为状态源，Bevy 只负责同步显示。
+```
+
+简而言之：当前由 Bevy 帧时间驱动 MuJoCo 的写法适合作为可视化 demo，但不适合作为严格控制实验的时间基准。后续应当将渲染循环与物理/控制循环解耦，让 MuJoCo 和控制器按照固定步长推进，Bevy 仅作为可视化观察器。
+
 ## 无图形界面的日志验证
 
 当无法使用 GPU 渲染时，可以使用无图形界面模式。该模式默认记录 `q_e0 q_ev` 型反馈，作为与早期实验一致的基准：
