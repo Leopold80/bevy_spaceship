@@ -1,12 +1,12 @@
 # Bevy Spacecraft
 
-基于 Bevy 的飞船强化学习/控制系统仿真可视化环境。当前版本包含 Apollo 风格登月舱资源、四元数姿态误差计算、运动学姿态控制律、日志验证和可视化演示。
+基于 Bevy 的飞船强化学习/控制系统仿真可视化环境。当前版本包含 Apollo 风格登月舱资源、Starship-inspired 不锈钢火箭外形资源、MuJoCo Apollo 6DoF 动力学实验、四元数姿态误差计算、运动学姿态控制律、日志验证和可视化演示。
 
 工程目标是把算法数学与 Bevy 场景细节分开：控制律和误差计算应能被控制/RL 实验直接调用，飞船造型资源应能单独查看和维护，演示程序则负责把二者组合成可视化验证环境。
 
 ## 运行入口
 
-只查看飞船模型和基础场景：
+只查看飞船模型和基础场景，当前会并排展示 Apollo 风格登月舱和 Starship-inspired 火箭模型：
 
 ```bash
 cargo run --bin model_viewer
@@ -16,6 +16,13 @@ cargo run --bin model_viewer
 
 ```bash
 cargo run --bin attitude_demo
+```
+
+运行 MuJoCo Apollo 6DoF 动力学演示：
+
+```bash
+source scripts/mujoco_env.zsh
+cargo run --bin mujoco_apollo_demo
 ```
 
 默认入口仍然指向姿态控制演示，因此下面的旧命令也可用：
@@ -52,6 +59,42 @@ omega_c = -kp * q_e0 * q_ev
 
 随着控制器收敛，当前坐标系应逐渐与期望坐标系重合。
 
+## MuJoCo Apollo 动力学实验
+
+MuJoCo 实验使用 `mujoco-rs`，macOS 下按 MuJoCo-rs 文档要求启用了 `renderer-winit-fallback`，并在 `Cargo.toml` 中 patch 了 `glutin`。MuJoCo 官方动态库不提交进仓库，推荐放在：
+
+```text
+.local/mujoco/3.9.0/macos/
+```
+
+目录结构应包含：
+
+```text
+.local/mujoco/3.9.0/macos/mujoco.framework/
+.local/mujoco/3.9.0/macos/libmujoco.dylib
+.local/mujoco/3.9.0/macos/libmujoco.3.9.0.dylib
+```
+
+其中 `libmujoco.dylib` 指向：
+
+```text
+mujoco.framework/Versions/A/libmujoco.3.9.0.dylib
+```
+
+从一个已下载好的 macOS framework 配置本仓库：
+
+```bash
+mkdir -p .local/mujoco/3.9.0/macos
+mv mujoco.framework .local/mujoco/3.9.0/macos/
+ln -sfn mujoco.framework/Versions/A/libmujoco.3.9.0.dylib .local/mujoco/3.9.0/macos/libmujoco.dylib
+ln -sfn mujoco.framework/Versions/A/libmujoco.3.9.0.dylib .local/mujoco/3.9.0/macos/libmujoco.3.9.0.dylib
+xattr -dr com.apple.quarantine .local/mujoco/3.9.0/macos/mujoco.framework
+codesign --force --deep --sign - .local/mujoco/3.9.0/macos/mujoco.framework
+source scripts/mujoco_env.zsh
+```
+
+Apollo 模型现在以 `src/apollo_spec.rs` 中的 Rust 部件规格作为单一来源。Bevy 的 Apollo 可视化模型和 MuJoCo MJCF 都由这份规格生成，避免维护两套尺寸和坐标。第一版 MuJoCo 模型使用零重力、一个 freejoint 刚体，以及 body-frame 6D 外力/力矩输入。
+
 ## 无图形界面的日志验证
 
 当无法使用 GPU 渲染时，可以使用无图形界面模式。该模式默认记录 `q_e0 q_ev` 型反馈，作为与早期实验一致的基准：
@@ -78,11 +121,14 @@ logs/attitude_kinematics.csv
 面向算法和工程维护的主要入口：
 
 - `src/attitude_control.rs`：与 Bevy 场景无关的控制律、四元数误差、误差角、积分函数和测试。
-- `src/spacecraft_model.rs`：Apollo 风格登月舱的几何造型、材质和 `spawn_lander` 入口。
+- `src/apollo_spec.rs`：Apollo 登月舱的统一部件规格，并生成 MuJoCo MJCF。
+- `src/mujoco_dynamics.rs`：MuJoCo Apollo 6DoF 动力学封装、状态读取和外力/力矩输入。
+- `src/spacecraft_model.rs`：Apollo 风格登月舱与 Starship-inspired 火箭的几何造型、材质和 `spawn_lander` / `spawn_starship` 入口；Apollo 视觉模型由 `apollo_spec` 生成。
 - `src/visualization.rs`：相机、光照、星空、目标/当前坐标系等可视化工具。
 - `src/attitude_log.rs`：CSV 日志和无图形界面验证。
 - `src/attitude_demo.rs`：姿态控制演示的 Bevy 系统、按键、HUD 和场景组合。
 - `src/bin/model_viewer.rs`：只展示模型的可执行入口。
+- `src/bin/mujoco_apollo_demo.rs`：MuJoCo Apollo 6DoF 动力学和 Bevy 可视化绑定入口。
 - `src/bin/attitude_demo.rs`：姿态控制演示的显式可执行入口。
 
 ## 理论说明
@@ -97,6 +143,7 @@ docs/quaternion_attitude_control.md
 
 ```bash
 cargo fmt --check
+source scripts/mujoco_env.zsh
 cargo check --bins
 cargo test
 cargo run --bin attitude_demo -- --headless-log

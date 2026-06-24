@@ -1,8 +1,9 @@
 use bevy::prelude::*;
-use bevy_spacecraft::spacecraft_model::{create_lander_materials, spawn_lander};
-use bevy_spacecraft::visualization::{
-    create_star_material, spawn_default_camera_and_light, spawn_stars,
+use bevy_spacecraft::spacecraft_model::{
+    create_lander_materials, create_starship_materials, spawn_lander, spawn_starship,
 };
+use bevy_spacecraft::visualization::{create_star_material, spawn_stars};
+use std::f32::consts::PI;
 
 fn main() {
     App::new()
@@ -28,9 +29,10 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    spawn_default_camera_and_light(&mut commands);
+    spawn_viewer_camera_and_light(&mut commands);
 
     let lander_materials = create_lander_materials(&mut materials);
+    let starship_materials = create_starship_materials(&mut materials);
     let star = create_star_material(&mut materials);
 
     spawn_stars(&mut commands, &mut meshes, star);
@@ -38,6 +40,28 @@ fn setup(
         &mut commands,
         &mut meshes,
         &lander_materials,
-        Transform::from_xyz(0.0, 0.85, 0.0),
+        Transform::from_xyz(-2.15, 0.65, 0.0).with_scale(Vec3::splat(0.82)),
     );
+    spawn_starship(
+        &mut commands,
+        &mut meshes,
+        &starship_materials,
+        Transform::from_xyz(2.0, 0.15, 0.0),
+    );
+}
+
+fn spawn_viewer_camera_and_light(commands: &mut Commands) {
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(5.8, 3.4, 8.8).looking_at(Vec3::new(0.2, 1.55, 0.0), Vec3::Y),
+    ));
+
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 22_000.0,
+            shadow_maps_enabled: true,
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -PI / 4.0, PI / 5.0, 0.0)),
+    ));
 }
