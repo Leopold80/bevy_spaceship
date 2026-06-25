@@ -107,6 +107,11 @@ plant:      J * omega_dot + omega x Jomega = tau, integrated by MuJoCo
 
 也就是说，PID 不再直接改运动学姿态积分，而是作为内层动力学控制器向 MuJoCo freejoint 刚体施加力矩。`R` 会重置 MuJoCo 状态和 PID 积分/微分历史。
 
+## 动力学 TODO 索引
+
+- MuJoCo/控制步长解耦（见 TODO section）
+- RCS 喷口控制分配：docs/rcs_thruster_allocation_dynamics_todo.md
+
 ## TODO：将 MuJoCo 仿真/控制步长与 Bevy 渲染帧时间解耦
 
 当前的 MuJoCo-Bevy 联合方式主要面向实时可视化 demo。在 `mujoco_apollo_demo` 中，MuJoCo 的仿真推进依赖 Bevy 每一帧的 `delta time`，随后再把 MuJoCo 状态同步到 Bevy 的可视模型上。这样做适合快速演示，因为屏幕上的运动大致跟随真实时间。
@@ -121,124 +126,33 @@ x[k+1] = F(x[k], u[k], Δt)
 
 其中仿真步长或控制步长 `Δt` 应该由控制实验本身定义，而不应该由渲染帧率决定。控制算法的效果不应依赖 GPU 负载、窗口刷新率、操作系统调度或临时卡顿。
 
-如果直接用 Bevy 的帧时间推进 MuJoCo，那么同一个控制输入在不同机器、不同帧率，甚至同一次运行中的不同帧上，都会作用不同的物理时间。这会导致控制实验的可重复性下降，并且把被控对象动力学错误地耦合到可视化后端上。
-
 后续应当区分三种时间尺度：
 
 ```text
 1. MuJoCo 仿真步长
-   较小且固定的物理积分步长，例如 0.001 s 或 0.002 s。
-
 2. 控制器更新步长
-   固定的控制输入更新周期，例如 0.01 s 或 0.02 s。
-
 3. Bevy 渲染帧时间
-   可变的显示刷新时间，只用于画面更新，不参与定义物理系统。
 ```
 
-例如，后续控制实验可以采用：
+例如：
 
 ```text
 MuJoCo simulation dt:   0.002 s
 Controller dt:          0.020 s
-Control hold:           10 个 MuJoCo 小步 / 1 个控制周期
+Control hold:           10 steps
 ```
 
-也就是说，每次控制器更新控制输入 `u[k]` 后，应当在固定数量的 MuJoCo 小步内保持该输入：
+在严格控制实验模式下，Bevy 不应该驱动物理时间，仅负责显示 MuJoCo 状态。
 
-```text
-state = read_mujoco_state()
-control = controller(state, reference)
-
-for _ in 0..control_hold:
-    apply_control(control)
-    mujoco_step_fixed_dt()
-
-next_state = read_mujoco_state()
-```
-
-在严格控制实验模式下，Bevy 不应该驱动物理时间。Bevy 应该只读取 MuJoCo 的最新状态，并更新飞行器可视模型的 `Transform`。
-
-推荐后续结构：
+推荐结构：
 
 ```text
 src/mujoco_dynamics.rs
-    MuJoCo 底层动力学封装。
-    负责 reset、固定步长积分、施加外力/力矩或执行器输入、
-    读取位置、姿态、速度和角速度等状态。
-
 src/control_env.rs
-    控制实验环境封装。
-    负责固定控制步长、控制输入保持、参考信号生成、
-    状态记录、误差计算和实验 reset。
-
-src/bin/mujoco_apollo_demo.rs
-    实时 Bevy 可视化 demo。
-    可以继续使用 wall-clock time，用于交互式演示和模型观察。
-
 src/bin/control_headless_demo.rs
-    无窗口固定步长控制实验。
-    不依赖 Bevy，用来验证控制算法、记录数据和检查可重复性。
-
 src/bin/control_visual_demo.rs
-    可选的控制可视化模式。
-    固定步长控制实验作为状态源，Bevy 只负责同步显示。
 ```
 
-简而言之：当前由 Bevy 帧时间驱动 MuJoCo 的写法适合作为可视化 demo，但不适合作为严格控制实验的时间基准。后续应当将渲染循环与物理/控制循环解耦，让 MuJoCo 和控制器按照固定步长推进，Bevy 仅作为可视化观察器。
+## 无图形界面日志验证
 
-## 无图形界面的日志验证
-
-当无法使用 GPU 渲染时，可以使用无图形界面模式。该模式默认记录 `q_e0 q_ev` 型反馈，作为与早期实验一致的基准：
-
-```bash
-cargo run --bin attitude_demo -- --headless-log
-```
-
-该命令会写入：
-
-```text
-logs/attitude_kinematics.csv
-```
-
-期望的变化趋势：
-
-- `qe0 >= 0`，说明实现了 unwinding 避免机制。
-- `qev_norm` 逐渐减小并趋近于零。
-- `error_angle_rad` 逐渐减小并趋近于零。
-- `omega_norm` 随着误差缩小而减小。
-
-## 代码结构
-
-面向算法和工程维护的主要入口：
-
-- `src/attitude_control.rs`：与 Bevy 场景无关的控制律、四元数误差、误差角、积分函数和测试；内部使用 `glam` 数学类型。
-- `src/apollo_spec.rs`：Apollo 登月舱的统一部件规格，并生成 MuJoCo MJCF。
-- `src/control_law.rs`：与 Bevy 场景无关的控制器接口，以及“外层四元数运动学 + 内层角速度 PID 力矩”的双层姿态控制器。
-- `src/mujoco_dynamics.rs`：MuJoCo Apollo 6DoF 动力学封装、状态读取和外力/力矩输入；不依赖 Bevy 显示类型。
-- `src/control_env.rs`：固定控制周期环境，负责控制器更新、MuJoCo 小步保持、reset 和 snapshot；不依赖 Bevy。
-- `src/spacecraft_model.rs`：Apollo 风格登月舱与 Starship-inspired 火箭的几何造型、材质和 `spawn_lander` / `spawn_starship` 入口；Apollo 视觉模型由 `apollo_spec` 生成。
-- `src/visualization.rs`：相机、光照、星空、目标/当前坐标系等可视化工具。
-- `src/attitude_log.rs`：CSV 日志和无图形界面验证。
-- `src/attitude_demo.rs`：姿态控制演示的 Bevy 系统、按键、HUD 和场景组合。
-- `src/bin/model_viewer.rs`：只展示模型的可执行入口。
-- `src/bin/mujoco_apollo_demo.rs`：MuJoCo Apollo 6DoF 动力学和 Bevy 可视化绑定入口。
-- `src/bin/attitude_demo.rs`：姿态控制演示的显式可执行入口。
-
-## 理论说明
-
-修正后的推导保存在：
-
-```text
-docs/quaternion_attitude_control.md
-```
-
-## 检查
-
-```bash
-cargo fmt --check
-source scripts/mujoco_env.zsh
-cargo check --bins
-cargo test
-cargo run --bin attitude_demo -- --headless-log
-```
+当无法使用 GPU 时使用 headless 模式记录控制效果。
