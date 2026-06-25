@@ -1,6 +1,8 @@
+use crate::apollo_timing::APOLLO_CONTROLLER_TIMESTEP_SECS;
 use crate::attitude_control::{ControlLaw, attitude_command, attitude_error, target_attitude};
 use crate::mujoco_dynamics::{ApolloDynamicsState, ApolloWrench};
 use glam::{Quat, Vec3};
+use std::f32::consts::PI;
 
 /// 固定步长 MuJoCo 控制器的公共接口。
 ///
@@ -20,21 +22,45 @@ pub trait ApolloController: Send + 'static {
 /// 机体系控制力矩。
 #[derive(Debug, Clone, Copy)]
 pub struct AttitudeRatePidGains {
+    /// 角速度误差比例力矩。
     pub kp: f32,
+    /// 小残差补偿。自由刚体姿态控制通常不需要很强的积分项，因此默认值
+    /// 刻意偏小，只用于消除模型或数值偏差。
     pub ki: f32,
+    /// 测量角加速度阻尼。这里的 D 项作用在 `omega_body` 的导数上，
+    /// 而不是作用在 `omega_command_body - omega_body` 的导数上，避免外环
+    /// 指令变化带来的 derivative kick。
     pub kd: f32,
+    /// 直接角速度阻尼项 `-angular_damping * omega_body`。这是抑制自由刚体
+    /// 过冲和振荡的主要阻尼来源。
+    pub angular_damping: f32,
+    /// 测量角加速度微分通道的 biquad 二阶低通截止频率。
+    pub derivative_filter_cutoff_hz: f32,
+    /// biquad 二阶低通的 Q 值。默认略低于 Butterworth 的 0.707，优先减小
+    /// 峰化和振铃，而不是追求最陡过渡带。
+    pub derivative_filter_q: f32,
+    /// 积分向量幅值限制。
     pub integral_limit: f32,
+    /// 机体系力矩幅值限制。
     pub torque_limit: f32,
 }
 
 impl Default for AttitudeRatePidGains {
     fn default() -> Self {
         Self {
-            kp: 1000.0,
-            ki: 2.0,
-            kd: 120.0,
-            integral_limit: 0.45,
-            torque_limit: 1200.0,
+            // 比旧参数更积极：旧 kp=1000 时角速度环偏软，外环姿态误差
+            // 只能慢慢压下去。这里提高比例力矩，但用阻尼和命令限幅兜住过冲。
+            kp: 2_200.0,
+            // 积分项只负责很小的稳态残差，不把它当成主要收敛通道。
+            ki: 35.0,
+            // D 项改为测量角加速度阻尼，避免姿态外环命令变化时的微分踢。
+            kd: 260.0,
+            // 显式角速度阻尼是压振荡的关键，比盲目加大 D 项更稳。
+            angular_damping: 720.0,
+            derivative_filter_cutoff_hz: 5.0,
+            derivative_filter_q: 0.62,
+            integral_limit: 0.35,
+            torque_limit: 2_600.0,
         }
     }
 }
@@ -52,22 +78,31 @@ pub struct CascadedAttitudeController {
     target: Quat,
     outer_kp: f32,
     outer_law: ControlLaw,
+    max_rate_command: f32,
     rate_gains: AttitudeRatePidGains,
     rate_error_integral: Vec3,
-    previous_rate_error: Option<Vec3>,
-    previous_time_secs: Option<f32>,
+    previous_omega_body: Option<Vec3>,
+    omega_derivative_filter: Vec3BiquadLowPass,
 }
 
 impl Default for CascadedAttitudeController {
     fn default() -> Self {
+        let rate_gains = AttitudeRatePidGains::default();
         Self {
             target: target_attitude(),
-            outer_kp: 3.2,
+            // 外环比旧值 3.2 略激进，提高大姿态误差时的收敛速度。
+            // 真正防止过冲的是 max_rate_command 和内环阻尼，而不是把外环调慢。
+            outer_kp: 4.6,
             outer_law: ControlLaw::FixedGain,
-            rate_gains: AttitudeRatePidGains::default(),
+            max_rate_command: 1.35,
+            rate_gains,
             rate_error_integral: Vec3::ZERO,
-            previous_rate_error: None,
-            previous_time_secs: None,
+            previous_omega_body: None,
+            omega_derivative_filter: Vec3BiquadLowPass::new_low_pass(
+                APOLLO_CONTROLLER_TIMESTEP_SECS,
+                rate_gains.derivative_filter_cutoff_hz,
+                rate_gains.derivative_filter_q,
+            ),
         }
     }
 }
@@ -78,6 +113,11 @@ impl CascadedAttitudeController {
             target,
             outer_law,
             rate_gains,
+            omega_derivative_filter: Vec3BiquadLowPass::new_low_pass(
+                APOLLO_CONTROLLER_TIMESTEP_SECS,
+                rate_gains.derivative_filter_cutoff_hz,
+                rate_gains.derivative_filter_q,
+            ),
             ..Self::default()
         }
     }
@@ -87,48 +127,55 @@ impl CascadedAttitudeController {
         2.0 * error.w.clamp(-1.0, 1.0).acos()
     }
 
-    /// 计算机体系下的内层 PID 控制力矩。
+    /// 计算机体系下的内层离散 PID 控制力矩。
     ///
-    /// 积分项会做幅值限制，避免重置瞬态或持续跟踪误差导致 windup。
-    /// 最终力矩也会限幅，使控制器更像有限执行器，而不是理想力矩源。
-    fn rate_pid_torque(&mut self, rate_error_body: Vec3, dt: f32) -> Vec3 {
-        if dt > 0.0 {
-            self.rate_error_integral += rate_error_body * dt;
-            self.rate_error_integral =
-                clamp_vector_length(self.rate_error_integral, self.rate_gains.integral_limit);
-        }
+    /// 这里使用固定控制采样时间 `APOLLO_CONTROLLER_TIMESTEP_SECS`，不再从
+    /// 时间戳差分反推 dt。D 项作用在测量角速度的导数上，并经过 biquad
+    /// 二阶低通，避免外环命令突变造成 derivative kick。
+    fn rate_pid_torque(&mut self, rate_error_body: Vec3, omega_body: Vec3) -> Vec3 {
+        let dt = APOLLO_CONTROLLER_TIMESTEP_SECS;
+        let omega_derivative = self.filtered_omega_derivative(omega_body, dt);
 
-        let rate_error_derivative = if dt > 0.0 {
-            self.previous_rate_error
-                .map(|previous| (rate_error_body - previous) / dt)
-                .unwrap_or(Vec3::ZERO)
+        let candidate_integral = clamp_vector_length(
+            self.rate_error_integral + rate_error_body * dt,
+            self.rate_gains.integral_limit,
+        );
+
+        let torque_without_integral = self.rate_gains.kp * rate_error_body
+            - self.rate_gains.kd * omega_derivative
+            - self.rate_gains.angular_damping * omega_body;
+        let candidate_torque =
+            torque_without_integral + self.rate_gains.ki * candidate_integral;
+
+        // 条件积分：如果未饱和，接受新的积分状态；如果力矩已经饱和，冻结
+        // 积分，避免大姿态误差阶段 windup，随后在进入线性区后再恢复积分。
+        let torque = if vector_length_exceeds(candidate_torque, self.rate_gains.torque_limit) {
+            torque_without_integral + self.rate_gains.ki * self.rate_error_integral
         } else {
-            Vec3::ZERO
+            self.rate_error_integral = candidate_integral;
+            candidate_torque
         };
-        self.previous_rate_error = Some(rate_error_body);
-
-        let torque = self.rate_gains.kp * rate_error_body
-            + self.rate_gains.ki * self.rate_error_integral
-            + self.rate_gains.kd * rate_error_derivative;
 
         clamp_vector_length(torque, self.rate_gains.torque_limit)
+    }
+
+    fn filtered_omega_derivative(&mut self, omega_body: Vec3, dt: f32) -> Vec3 {
+        let raw_derivative = self
+            .previous_omega_body
+            .map(|previous| (omega_body - previous) / dt)
+            .unwrap_or(Vec3::ZERO);
+        self.previous_omega_body = Some(omega_body);
+        self.omega_derivative_filter.update(raw_derivative)
     }
 }
 
 impl ApolloController for CascadedAttitudeController {
-    fn update(&mut self, state: ApolloDynamicsState, sim_time_secs: f32) -> ApolloWrench {
-        // `ApolloControlEnv` 每个固定控制周期只调用一次控制器。第一个
-        // 周期还没有上一帧时间戳，因此该采样点故意不启用积分和微分项。
-        let dt = self
-            .previous_time_secs
-            .map(|previous| sim_time_secs - previous)
-            .unwrap_or(0.0);
-        self.previous_time_secs = Some(sim_time_secs);
-
+    fn update(&mut self, state: ApolloDynamicsState, _sim_time_secs: f32) -> ApolloWrench {
         // 外层：复用四元数运动学姿态控制律生成期望角速度。这里得到的
         // 仍然只是指令，不是被控对象输入；MuJoCo 被控对象接收的是力/力矩。
         let (omega_command_body, _) =
             attitude_command(self.target, state.rotation, self.outer_kp, self.outer_law);
+        let omega_command_body = clamp_vector_length(omega_command_body, self.max_rate_command);
 
         // MuJoCo 读出的 freejoint 角速度是世界系表达。我们施加的是机体系
         // wrench，因此角速度反馈也转换到与力矩指令一致的机体系中计算。
@@ -137,14 +184,79 @@ impl ApolloController for CascadedAttitudeController {
 
         ApolloWrench {
             force_body: Vec3::ZERO,
-            torque_body: self.rate_pid_torque(rate_error_body, dt),
+            torque_body: self.rate_pid_torque(rate_error_body, omega_body),
         }
     }
 
     fn reset(&mut self) {
         self.rate_error_integral = Vec3::ZERO;
-        self.previous_rate_error = None;
-        self.previous_time_secs = None;
+        self.previous_omega_body = None;
+        self.omega_derivative_filter.reset();
+    }
+}
+
+/// 三轴向量版 biquad 二阶低通。每个轴共享同一组稳定系数，但保留独立状态。
+#[derive(Debug, Clone, Copy)]
+struct Vec3BiquadLowPass {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: Vec3,
+    x2: Vec3,
+    y1: Vec3,
+    y2: Vec3,
+}
+
+impl Vec3BiquadLowPass {
+    fn new_low_pass(sample_time_secs: f32, cutoff_hz: f32, q: f32) -> Self {
+        let sample_rate_hz = 1.0 / sample_time_secs.max(1e-6);
+        let cutoff_hz = cutoff_hz.clamp(0.05, sample_rate_hz * 0.45);
+        let q = q.max(0.25);
+        let omega = 2.0 * PI * cutoff_hz / sample_rate_hz;
+        let sin_omega = omega.sin();
+        let cos_omega = omega.cos();
+        let alpha = sin_omega / (2.0 * q);
+
+        let b0 = (1.0 - cos_omega) * 0.5;
+        let b1 = 1.0 - cos_omega;
+        let b2 = (1.0 - cos_omega) * 0.5;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_omega;
+        let a2 = 1.0 - alpha;
+
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+            x1: Vec3::ZERO,
+            x2: Vec3::ZERO,
+            y1: Vec3::ZERO,
+            y2: Vec3::ZERO,
+        }
+    }
+
+    fn update(&mut self, input: Vec3) -> Vec3 {
+        let output = self.b0 * input + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+
+        self.x2 = self.x1;
+        self.x1 = input;
+        self.y2 = self.y1;
+        self.y1 = output;
+
+        output
+    }
+
+    fn reset(&mut self) {
+        self.x1 = Vec3::ZERO;
+        self.x2 = Vec3::ZERO;
+        self.y1 = Vec3::ZERO;
+        self.y2 = Vec3::ZERO;
     }
 }
 
@@ -155,6 +267,10 @@ fn clamp_vector_length(value: Vec3, max_length: f32) -> Vec3 {
     } else {
         value.normalize() * max_length
     }
+}
+
+fn vector_length_exceeds(value: Vec3, max_length: f32) -> bool {
+    max_length > 0.0 && value.length_squared() > max_length * max_length
 }
 
 #[cfg(test)]
@@ -182,7 +298,18 @@ mod tests {
         let final_error_angle = 2.0 * final_error.w.clamp(-1.0, 1.0).acos();
         assert!(snapshot.state.rotation.is_finite());
         assert!(snapshot.state.angular_velocity.is_finite());
-        assert!(final_error_angle < initial_error_angle * 0.25);
-        assert!(final_error_angle < 0.08);
+        assert!(final_error_angle < initial_error_angle * 0.20);
+        assert!(final_error_angle < 0.06);
+    }
+
+    #[test]
+    fn biquad_low_pass_keeps_step_response_finite() {
+        let mut filter = Vec3BiquadLowPass::new_low_pass(APOLLO_CONTROLLER_TIMESTEP_SECS, 5.0, 0.62);
+        let mut output = Vec3::ZERO;
+        for _ in 0..120 {
+            output = filter.update(Vec3::new(1.0, -2.0, 0.5));
+            assert!(output.is_finite());
+        }
+        assert!(output.distance(Vec3::new(1.0, -2.0, 0.5)) < 1e-3);
     }
 }
