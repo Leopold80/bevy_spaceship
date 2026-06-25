@@ -1449,6 +1449,7 @@ name = "bevy_spacecraft"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "glam",
  "mujoco-rs",
 ]
 

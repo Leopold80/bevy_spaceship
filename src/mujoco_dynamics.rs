@@ -1,5 +1,5 @@
 use crate::apollo_spec::{APOLLO_BODY_NAME, apollo_mjcf_xml};
-use bevy::prelude::*;
+use glam::{Quat, Vec3};
 use mujoco_rs::prelude::*;
 use std::sync::Arc;
 
@@ -17,7 +17,6 @@ pub struct ApolloDynamicsState {
     pub angular_velocity: Vec3,
 }
 
-#[derive(Resource)]
 pub struct ApolloDynamics {
     model: Arc<MjModel>,
     data: MjData<Arc<MjModel>>,
@@ -43,6 +42,10 @@ impl ApolloDynamics {
 
     pub fn model(&self) -> &MjModel {
         &self.model
+    }
+
+    pub fn simulation_dt_secs(&self) -> f32 {
+        self.model.opt().timestep as f32
     }
 
     pub fn state(&self) -> ApolloDynamicsState {
@@ -93,12 +96,20 @@ impl ApolloDynamics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::apollo_spec::APOLLO_MUJOCO_TIMESTEP_SECS;
 
     fn is_finite_state(state: ApolloDynamicsState) -> bool {
         state.position.is_finite()
             && state.rotation.is_finite()
             && state.linear_velocity.is_finite()
             && state.angular_velocity.is_finite()
+    }
+
+    #[test]
+    fn apollo_mujoco_model_uses_fixed_timestep() {
+        let dynamics = ApolloDynamics::new().expect("Apollo MuJoCo model should load");
+
+        assert!((dynamics.simulation_dt_secs() - APOLLO_MUJOCO_TIMESTEP_SECS as f32).abs() < 1e-6);
     }
 
     #[test]
@@ -124,7 +135,7 @@ mod tests {
         };
 
         let mut final_state = initial;
-        for _ in 0..80 {
+        for _ in 0..400 {
             final_state = dynamics.step(wrench);
         }
 

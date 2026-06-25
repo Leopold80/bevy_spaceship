@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+use glam::{EulerRot, Quat, Vec3};
 
 pub const ATTITUDE_KP: f32 = 2.4;
 

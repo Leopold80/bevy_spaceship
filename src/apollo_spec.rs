@@ -3,6 +3,7 @@ use std::fmt::Write;
 
 pub const APOLLO_BODY_NAME: &str = "apollo_lander";
 pub const APOLLO_FREEJOINT_NAME: &str = "apollo_freejoint";
+pub const APOLLO_MUJOCO_TIMESTEP_SECS: f64 = 0.002;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApolloMaterial {
@@ -280,7 +281,7 @@ pub fn apollo_mjcf_xml() -> String {
     writeln!(xml, "<mujoco model=\"apollo_lander\">").unwrap();
     writeln!(
         xml,
-        "  <option timestep=\"0.01\" gravity=\"0 0 0\" integrator=\"RK4\"/>"
+        "  <option timestep=\"{APOLLO_MUJOCO_TIMESTEP_SECS}\" gravity=\"0 0 0\" integrator=\"RK4\"/>"
     )
     .unwrap();
     writeln!(xml, "  <compiler angle=\"radian\"/>").unwrap();

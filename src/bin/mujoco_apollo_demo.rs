@@ -1,18 +1,29 @@
 use bevy::prelude::*;
-use bevy_spacecraft::mujoco_dynamics::{ApolloDynamics, ApolloWrench};
+use bevy_spacecraft::attitude_control::target_attitude;
+use bevy_spacecraft::control_env::SharedApolloState;
 use bevy_spacecraft::spacecraft_model::{create_lander_materials, spawn_lander};
 use bevy_spacecraft::visualization::{
-    create_star_material, spawn_default_camera_and_light, spawn_stars,
+    TARGET_FRAME_CENTER, create_reference_frame_materials, create_star_material,
+    spawn_current_frame, spawn_default_camera_and_light, spawn_stars, spawn_target_frame,
 };
 
 #[derive(Component)]
 struct ApolloVisualRoot;
 
+#[derive(Component)]
+struct ApolloCurrentFrameRoot;
+
+#[derive(Resource)]
+struct ApolloStateResource(SharedApolloState);
+
 fn main() {
+    let shared_state =
+        SharedApolloState::start().expect("failed to start Apollo simulation thread");
+
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "MuJoCo Apollo 6DoF Dynamics".into(),
+                title: "MuJoCo Apollo Cascaded Attitude Control".into(),
                 resolution: (1280, 800).into(),
                 ..default()
             }),
@@ -23,9 +34,9 @@ fn main() {
             brightness: 900.0,
             affects_lightmapped_meshes: true,
         })
-        .insert_resource(ApolloDynamics::new().expect("failed to initialize Apollo MuJoCo model"))
+        .insert_resource(ApolloStateResource(shared_state))
         .add_systems(Startup, setup)
-        .add_systems(Update, (handle_input, step_mujoco_and_sync_visual).chain())
+        .add_systems(Update, (handle_input, sync_visual_from_simulation).chain())
         .run();
 }
 
@@ -38,8 +49,21 @@ fn setup(
 
     let lander_materials = create_lander_materials(&mut materials);
     let star = create_star_material(&mut materials);
+    let frame_materials = create_reference_frame_materials(&mut materials);
 
     spawn_stars(&mut commands, &mut meshes, star);
+    spawn_target_frame(
+        &mut commands,
+        &mut meshes,
+        &frame_materials,
+        target_attitude(),
+    );
+    let current_frame =
+        spawn_current_frame(&mut commands, &mut meshes, &frame_materials, Quat::IDENTITY);
+    commands
+        .entity(current_frame)
+        .insert(ApolloCurrentFrameRoot);
+
     let lander = spawn_lander(
         &mut commands,
         &mut meshes,
@@ -49,7 +73,9 @@ fn setup(
     commands.entity(lander).insert(ApolloVisualRoot);
 
     commands.spawn((
-        Text::new("MuJoCo Apollo 6DoF | R reset | body-frame force + torque demo"),
+        Text::new(
+            "MuJoCo Apollo 6DoF | cascaded attitude control | outer quaternion kinematics + inner rate PID torque | R reset",
+        ),
         TextFont::from_font_size(16.0),
         TextColor(Color::srgb(0.92, 0.96, 1.0)),
         Node {
@@ -61,33 +87,33 @@ fn setup(
     ));
 }
 
-fn handle_input(keyboard: Res<ButtonInput<KeyCode>>, mut dynamics: ResMut<ApolloDynamics>) {
+fn handle_input(keyboard: Res<ButtonInput<KeyCode>>, shared_state: Res<ApolloStateResource>) {
     if keyboard.just_pressed(KeyCode::KeyR) {
-        dynamics.reset();
+        shared_state.0.request_reset();
     }
 }
 
-fn step_mujoco_and_sync_visual(
-    time: Res<Time>,
-    mut dynamics: ResMut<ApolloDynamics>,
-    mut query: Query<&mut Transform, With<ApolloVisualRoot>>,
+fn sync_visual_from_simulation(
+    shared_state: Res<ApolloStateResource>,
+    mut lander_query: Query<&mut Transform, With<ApolloVisualRoot>>,
+    mut frame_query: Query<
+        &mut Transform,
+        (With<ApolloCurrentFrameRoot>, Without<ApolloVisualRoot>),
+    >,
 ) {
-    let dt = time.delta_secs();
-    let steps = (dt / 0.01).ceil().clamp(1.0, 6.0) as usize;
-    let wrench = ApolloWrench {
-        force_body: Vec3::new(180.0, 30.0, 0.0),
-        torque_body: Vec3::new(0.0, 0.0, 40.0),
-    };
+    let state = shared_state.0.snapshot().state;
+    let position = Vec3::from_array(state.position.to_array());
+    let rotation = Quat::from_array(state.rotation.to_array());
 
-    let mut state = dynamics.state();
-    for _ in 0..steps {
-        state = dynamics.step(wrench);
-    }
-
-    let Ok(mut transform) = query.single_mut() else {
+    let Ok(mut transform) = lander_query.single_mut() else {
         return;
     };
+    transform.translation = position + Vec3::Y * 0.85;
+    transform.rotation = rotation;
 
-    transform.translation = state.position + Vec3::Y * 0.85;
-    transform.rotation = state.rotation;
+    let Ok(mut frame_transform) = frame_query.single_mut() else {
+        return;
+    };
+    frame_transform.translation = TARGET_FRAME_CENTER;
+    frame_transform.rotation = rotation;
 }

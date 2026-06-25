@@ -93,7 +93,19 @@ codesign --force --deep --sign - .local/mujoco/3.9.0/macos/mujoco.framework
 source scripts/mujoco_env.zsh
 ```
 
-Apollo 模型现在以 `src/apollo_spec.rs` 中的 Rust 部件规格作为单一来源。Bevy 的 Apollo 可视化模型和 MuJoCo MJCF 都由这份规格生成，避免维护两套尺寸和坐标。第一版 MuJoCo 模型使用零重力、一个 freejoint 刚体，以及 body-frame 6D 外力/力矩输入。
+仓库的 `.vscode/settings.json` 已为 rust-analyzer 配置同一组 MuJoCo 环境变量，因此 VS Code 内部的 `cargo check` / `cargo clippy` 不需要额外手动 source 脚本。终端里直接运行 MuJoCo demo 或测试时仍建议先 source 上面的脚本。
+
+Apollo 模型现在以 `src/apollo_spec.rs` 中的 Rust 部件规格作为单一来源。Bevy 的 Apollo 可视化模型和 MuJoCo MJCF 都由这份规格生成，避免维护两套尺寸和坐标。MuJoCo 模型使用零重力、一个 freejoint 刚体，以及 body-frame 6D 外力/力矩输入。
+
+当前 MuJoCo Apollo demo 默认运行双层姿态控制：
+
+```text
+outer loop: q_e -> omega_c                 # 复用四元数运动学姿态控制律
+inner loop: omega_c - omega_body -> tau    # PID 角速度环输出 body-frame 力矩
+plant:      J * omega_dot + omega x Jomega = tau, integrated by MuJoCo
+```
+
+也就是说，PID 不再直接改运动学姿态积分，而是作为内层动力学控制器向 MuJoCo freejoint 刚体施加力矩。`R` 会重置 MuJoCo 状态和 PID 积分/微分历史。
 
 ## TODO：将 MuJoCo 仿真/控制步长与 Bevy 渲染帧时间解耦
 
@@ -200,9 +212,11 @@ logs/attitude_kinematics.csv
 
 面向算法和工程维护的主要入口：
 
-- `src/attitude_control.rs`：与 Bevy 场景无关的控制律、四元数误差、误差角、积分函数和测试。
+- `src/attitude_control.rs`：与 Bevy 场景无关的控制律、四元数误差、误差角、积分函数和测试；内部使用 `glam` 数学类型。
 - `src/apollo_spec.rs`：Apollo 登月舱的统一部件规格，并生成 MuJoCo MJCF。
-- `src/mujoco_dynamics.rs`：MuJoCo Apollo 6DoF 动力学封装、状态读取和外力/力矩输入。
+- `src/control_law.rs`：与 Bevy 场景无关的控制器接口，以及“外层四元数运动学 + 内层角速度 PID 力矩”的双层姿态控制器。
+- `src/mujoco_dynamics.rs`：MuJoCo Apollo 6DoF 动力学封装、状态读取和外力/力矩输入；不依赖 Bevy 显示类型。
+- `src/control_env.rs`：固定控制周期环境，负责控制器更新、MuJoCo 小步保持、reset 和 snapshot；不依赖 Bevy。
 - `src/spacecraft_model.rs`：Apollo 风格登月舱与 Starship-inspired 火箭的几何造型、材质和 `spawn_lander` / `spawn_starship` 入口；Apollo 视觉模型由 `apollo_spec` 生成。
 - `src/visualization.rs`：相机、光照、星空、目标/当前坐标系等可视化工具。
 - `src/attitude_log.rs`：CSV 日志和无图形界面验证。
