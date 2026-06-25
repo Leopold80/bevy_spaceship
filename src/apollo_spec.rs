@@ -194,7 +194,12 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
         let angle = i as f32 * std::f32::consts::FRAC_PI_2 + std::f32::consts::PI / 4.0;
         let dir = Vec3::new(angle.cos(), 0.0, angle.sin());
         let foot = dir * 2.05 + Vec3::new(0.0, -1.16, 0.0);
-        let upper = dir * 0.78 + Vec3::new(0.0, 0.18, 0.0);
+
+        // Keep landing-leg attachment points outside the descent-stage hull. The
+        // previous upper node was near the body center and the brace started at
+        // the centerline, so the rendered cylinders visibly pierced the stage.
+        let upper_mount = dir * 1.42 + Vec3::new(0.0, 0.08, 0.0);
+        let lower_brace_mount = dir * 1.36 + Vec3::new(0.0, -0.12, 0.0);
 
         parts.push(ApolloPart {
             name: match i {
@@ -204,7 +209,7 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
                 _ => "landing_strut_front_left",
             },
             shape: ApolloShape::Strut {
-                start: upper,
+                start: upper_mount,
                 end: foot,
                 radius: 0.035,
                 resolution: 12,
@@ -224,7 +229,7 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
                 _ => "landing_brace_front_left",
             },
             shape: ApolloShape::Strut {
-                start: Vec3::new(0.0, 0.15, 0.0),
+                start: lower_brace_mount,
                 end: foot + Vec3::new(0.0, 0.22, 0.0),
                 radius: 0.022,
                 resolution: 10,
@@ -266,7 +271,7 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
                 size: Vec3::new(0.12, 0.42, 0.12),
             },
             material: ApolloMaterial::Dark,
-            translation: upper + dir * 0.18,
+            translation: upper_mount + dir * 0.08 + Vec3::new(0.0, 0.02, 0.0),
             rotation: Quat::from_rotation_y(-angle),
             scale: Vec3::ONE,
             physics_mass: None,
