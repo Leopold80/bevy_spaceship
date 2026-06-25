@@ -1,4 +1,5 @@
 pub mod apollo_spec;
+pub mod apollo_timing;
 pub mod attitude_control;
 pub mod attitude_demo;
 pub mod attitude_log;
