@@ -92,7 +92,7 @@ impl Default for CascadedAttitudeController {
             target: target_attitude(),
             // 外环比旧值 3.2 略激进，提高大姿态误差时的收敛速度。
             // 真正防止过冲的是 max_rate_command 和内环阻尼，而不是把外环调慢。
-            outer_kp: 4.6,
+            outer_kp: 5.0,
             outer_law: ControlLaw::FixedGain,
             max_rate_command: 1.35,
             rate_gains,

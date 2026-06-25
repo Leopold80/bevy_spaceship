@@ -194,7 +194,7 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
         let angle = i as f32 * std::f32::consts::FRAC_PI_2 + std::f32::consts::PI / 4.0;
         let dir = Vec3::new(angle.cos(), 0.0, angle.sin());
         let foot = dir * 2.05 + Vec3::new(0.0, -1.16, 0.0);
-        let upper = dir * 0.78 + Vec3::new(0.0, 0.18, 0.0);
+        let leg_mount = dir * 1.02 + Vec3::new(0.0, 0.0, 0.0);
 
         parts.push(ApolloPart {
             name: match i {
@@ -204,7 +204,7 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
                 _ => "landing_strut_front_left",
             },
             shape: ApolloShape::Strut {
-                start: upper,
+                start: leg_mount,
                 end: foot,
                 radius: 0.035,
                 resolution: 12,
@@ -214,26 +214,6 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
             physics_mass: Some(24.0),
-        });
-
-        parts.push(ApolloPart {
-            name: match i {
-                0 => "landing_brace_front_right",
-                1 => "landing_brace_back_right",
-                2 => "landing_brace_back_left",
-                _ => "landing_brace_front_left",
-            },
-            shape: ApolloShape::Strut {
-                start: Vec3::new(0.0, 0.15, 0.0),
-                end: foot + Vec3::new(0.0, 0.22, 0.0),
-                radius: 0.022,
-                resolution: 10,
-            },
-            material: ApolloMaterial::Metal,
-            translation: Vec3::ZERO,
-            rotation: Quat::IDENTITY,
-            scale: Vec3::ONE,
-            physics_mass: Some(12.0),
         });
 
         parts.push(ApolloPart {
@@ -263,10 +243,10 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
                 _ => "leg_fairing_front_left",
             },
             shape: ApolloShape::Cuboid {
-                size: Vec3::new(0.12, 0.42, 0.12),
+                size: Vec3::new(0.2, 0.14, 0.18),
             },
             material: ApolloMaterial::Dark,
-            translation: upper + dir * 0.18,
+            translation: leg_mount + dir * 0.08 + Vec3::new(0.0, 0.01, 0.0),
             rotation: Quat::from_rotation_y(-angle),
             scale: Vec3::ONE,
             physics_mass: None,
@@ -373,5 +353,38 @@ mod tests {
         assert!(xml.contains(APOLLO_BODY_NAME));
         assert!(xml.contains(APOLLO_FREEJOINT_NAME));
         assert!(xml.contains("descent_stage"));
+    }
+
+    #[test]
+    fn landing_gear_starts_below_descent_stage_skirt() {
+        let descent_stage_bottom = 0.62 - 1.25 * 0.82 * 0.5;
+
+        for part in apollo_parts()
+            .into_iter()
+            .filter(|part| part.name.starts_with("landing_strut"))
+        {
+            let ApolloShape::Strut { start, end, .. } = part.shape else {
+                panic!("{} should be a strut", part.name);
+            };
+            let start_radial = Vec2::new(start.x, start.z).length();
+            let end_radial = Vec2::new(end.x, end.z).length();
+
+            assert!(
+                start.y <= descent_stage_bottom - 0.02,
+                "{} starts above the descent-stage lower skirt: {}",
+                part.name,
+                start.y
+            );
+            assert!(
+                end.y < start.y,
+                "{} should angle downward away from the lander",
+                part.name
+            );
+            assert!(
+                end_radial > start_radial + 0.5,
+                "{} should sweep outward toward the footpad",
+                part.name
+            );
+        }
     }
 }
