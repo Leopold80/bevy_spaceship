@@ -5,6 +5,20 @@ pub const APOLLO_BODY_NAME: &str = "apollo_lander";
 pub const APOLLO_FREEJOINT_NAME: &str = "apollo_freejoint";
 pub const APOLLO_MUJOCO_TIMESTEP_SECS: f64 = 0.002;
 
+/// Apollo 11 LM lunar-landing diagonal moment-of-inertia (kg·m²).
+///
+/// source: SNA-8-D-027III Rev.2 CSM/LM Spacecraft Operational Data Book
+/// Vol.3, Apollo 11 Mission Report Appendix A.6.  Original values in
+/// slug-ft² converted to SI (1 slug-ft² = 1.35581795 kg·m²).
+///
+/// Coordinate mapping: LM (X fwd, Y right, Z down) → code (X right, Y up, Z fwd).
+///   code Ixx = LM Iyy = 13 867 slug-ft² → 18 801 kg·m²
+///   code Iyy = LM Izz = 16 204 slug-ft² → 21 970 kg·m²
+///   code Izz = LM Ixx = 12 582 slug-ft² → 17 059 kg·m²
+pub const APOLLO_IXX: f32 = 18_801.0;
+pub const APOLLO_IYY: f32 = 21_970.0;
+pub const APOLLO_IZZ: f32 = 17_059.0;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApolloMaterial {
     Gold,
@@ -265,6 +279,29 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
     parts
 }
 
+/// Sum of all `physics_mass` values across `apollo_parts()`.
+pub fn total_physics_mass() -> f32 {
+    apollo_parts()
+        .into_iter()
+        .filter_map(|p| p.physics_mass)
+        .sum()
+}
+
+/// Mass-weighted centre of mass of the physics-bearing parts, in body frame.
+pub fn center_of_mass() -> Vec3 {
+    let (weighted_sum, total_mass) = apollo_parts()
+        .into_iter()
+        .filter_map(|p| p.physics_mass.map(|m| (p.translation * m, m)))
+        .fold((Vec3::ZERO, 0.0_f32), |(acc_w, acc_m), (w, m)| {
+            (acc_w + w, acc_m + m)
+        });
+    if total_mass > 0.0 {
+        weighted_sum / total_mass
+    } else {
+        Vec3::ZERO
+    }
+}
+
 pub fn apollo_mjcf_xml() -> String {
     let mut xml = String::new();
     writeln!(xml, "<mujoco model=\"apollo_lander\">").unwrap();
@@ -283,11 +320,32 @@ pub fn apollo_mjcf_xml() -> String {
     writeln!(xml, "    <body name=\"{APOLLO_BODY_NAME}\" pos=\"0 0 0\">").unwrap();
     writeln!(xml, "      <freejoint name=\"{APOLLO_FREEJOINT_NAME}\"/>").unwrap();
 
+    // Body-level mass and centre of mass are computed from apollo_parts()
+    // so they stay in sync when part masses change.  The diagonal inertia
+    // is the Apollo 11 lunar-landing reference — a design target that
+    // simplified cylinder geometry cannot reproduce on its own.
+    let mass = total_physics_mass();
+    let com = center_of_mass();
+    writeln!(
+        xml,
+        "      <inertial pos=\"{com_x:.4} {com_y:.4} {com_z:.4}\" \
+         mass=\"{mass:.3}\" \
+         diaginertia=\"{APOLLO_IXX:.0} {APOLLO_IYY:.0} {APOLLO_IZZ:.0}\"/>",
+        com_x = com.x,
+        com_y = com.y,
+        com_z = com.z,
+    )
+    .unwrap();
+
+    // Geoms carry zero mass: the <inertial> element above provides the
+    // total body mass and inertia.  Keeping geoms massless keeps the
+    // single-source-of-truth property — the part masses in apollo_parts()
+    // define the total, not the per-geom XML attributes.
     for part in apollo_parts()
         .into_iter()
         .filter(|part| part.physics_mass.is_some())
     {
-        write_mjcf_geom(&mut xml, part);
+        write_mjcf_geom(&mut xml, part, 0.0);
     }
 
     writeln!(xml, "    </body>").unwrap();
@@ -296,8 +354,7 @@ pub fn apollo_mjcf_xml() -> String {
     xml
 }
 
-fn write_mjcf_geom(xml: &mut String, part: ApolloPart) {
-    let mass = part.physics_mass.unwrap();
+fn write_mjcf_geom(xml: &mut String, part: ApolloPart, mass: f32) {
     match part.shape {
         ApolloShape::Cuboid { size } => {
             let half = size * part.scale * 0.5;

@@ -144,7 +144,7 @@ mod tests {
         assert!(final_state.rotation.dot(initial.rotation).abs() < 0.99999);
     }
 
-    /// 诊断测试：打印 MuJoCo 计算的质量和转动惯量。
+    /// 诊断测试：打印 MuJoCo 计算的质量、转动惯量和质心位置。
     /// `cargo test dump_mass_properties -- --nocapture` 查看输出。
     #[test]
     fn dump_mass_properties() {
@@ -158,18 +158,28 @@ mod tests {
         let iyy = inertia[1];
         let izz = inertia[2];
 
+        // MuJoCo ipos = inertial-frame position relative to body frame (i.e. CoM)
+        let ipos = model.body_ipos()[body_id];
+        let com_x = ipos[0];
+        let com_y = ipos[1];
+        let com_z = ipos[2];
+
+        use crate::apollo_spec::{APOLLO_IXX, APOLLO_IYY, APOLLO_IZZ, center_of_mass, total_physics_mass};
+
         println!();
         println!("===== Apollo Lander Mass Properties (MuJoCo computed) =====");
-        println!("Mass:  {:.1} kg", mass);
+        println!("Mass:  {:.1} kg  (from parts: {:.1})", mass, total_physics_mass());
+        let com = center_of_mass();
+        println!("CoM (body frame):  ({:.3}, {:.3}, {:.3})  (from parts: {com_x:.3}, {com_y:.3}, {com_z:.3})",
+                 com_x, com_y, com_z, com_x=com.x, com_y=com.y, com_z=com.z);
         println!("Inertia (body diagonal, about CoM):");
-        println!("  Ixx = {:10.1} kg·m²", ixx);
-        println!("  Iyy = {:10.1} kg·m²", iyy);
-        println!("  Izz = {:10.1} kg·m²", izz);
+        println!("  Ixx = {:10.1}  (Apollo 11 target: {})", ixx, APOLLO_IXX);
+        println!("  Iyy = {:10.1}  (Apollo 11 target: {})", iyy, APOLLO_IYY);
+        println!("  Izz = {:10.1}  (Apollo 11 target: {})", izz, APOLLO_IZZ);
         println!("============================================================");
         println!();
-        println!("Target (Apollo 11 LM, lunar landing):");
-        println!("  Mass:  7327.0 kg");
-        println!("  I_xx ≈ 17059, I_yy ≈ 21970, I_zz ≈ 18801  (code Y-up)");
+        println!("Mass comes from apollo_parts(). CoM is mass-weighted from parts.");
+        println!("Inertia is set by <inertial diaginertia> using Apollo 11 constants.");
         println!();
 
         assert!(mass > 1000.0, "mass should be in the ton range");
