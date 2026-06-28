@@ -129,17 +129,51 @@ mod tests {
         let mut dynamics = ApolloDynamics::new().expect("Apollo MuJoCo model should load");
         let initial = dynamics.state();
 
+        // Wrench scaled to match real-scale vehicle (~7,300 kg, I ~ 24,000 kg·m²).
         let wrench = ApolloWrench {
-            force_body: Vec3::new(2400.0, 0.0, 0.0),
-            torque_body: Vec3::new(0.0, 0.0, 180.0),
+            force_body: Vec3::new(13_000.0, 0.0, 0.0),
+            torque_body: Vec3::new(0.0, 0.0, 4_000.0),
         };
 
         let mut final_state = initial;
-        for _ in 0..400 {
+        for _ in 0..600 {
             final_state = dynamics.step(wrench);
         }
 
         assert!(final_state.position.distance(initial.position) > 0.001);
         assert!(final_state.rotation.dot(initial.rotation).abs() < 0.99999);
+    }
+
+    /// 诊断测试：打印 MuJoCo 计算的质量和转动惯量。
+    /// `cargo test dump_mass_properties -- --nocapture` 查看输出。
+    #[test]
+    fn dump_mass_properties() {
+        let dynamics = ApolloDynamics::new().expect("Apollo MuJoCo model should load");
+        let model = dynamics.model();
+        let body_id = dynamics.body_id;
+
+        let mass = model.body_mass()[body_id];
+        let inertia = &model.body_inertia()[body_id];
+        let ixx = inertia[0];
+        let iyy = inertia[1];
+        let izz = inertia[2];
+
+        println!();
+        println!("===== Apollo Lander Mass Properties (MuJoCo computed) =====");
+        println!("Mass:  {:.1} kg", mass);
+        println!("Inertia (body diagonal, about CoM):");
+        println!("  Ixx = {:10.1} kg·m²", ixx);
+        println!("  Iyy = {:10.1} kg·m²", iyy);
+        println!("  Izz = {:10.1} kg·m²", izz);
+        println!("============================================================");
+        println!();
+        println!("Target (Apollo 11 LM, lunar landing):");
+        println!("  Mass:  7327.0 kg");
+        println!("  I_xx ≈ 17059, I_yy ≈ 21970, I_zz ≈ 18801  (code Y-up)");
+        println!();
+
+        assert!(mass > 1000.0, "mass should be in the ton range");
+        assert!(ixx > 1000.0 && iyy > 1000.0 && izz > 1000.0,
+                "inertia should be in the thousands");
     }
 }

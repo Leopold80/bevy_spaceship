@@ -56,52 +56,57 @@ impl ApolloPart {
 
 pub fn apollo_parts() -> Vec<ApolloPart> {
     let mut parts = vec![
+        // Apollo LM at lunar landing: ~7,327 kg total. Masses are scaled so
+        // that the MuJoCo-computed body mass matches that figure.
+        // The dry masses below are the real Apollo LM breakdown; the
+        // 1.6× multiplier accounts for propellant, crew, and consumables
+        // still aboard at landing.
         ApolloPart {
             name: "descent_stage",
             shape: ApolloShape::Cylinder {
-                radius: 1.25,
-                height: 1.25,
+                radius: 2.5,
+                height: 2.5,
                 resolution: 8,
             },
             material: ApolloMaterial::Metal,
-            translation: Vec3::new(0.0, 0.62, 0.0),
+            translation: Vec3::new(0.0, 1.24, 0.0),
             rotation: Quat::from_rotation_y(std::f32::consts::PI / 8.0),
             scale: Vec3::new(1.18, 0.82, 1.0),
-            physics_mass: Some(840.0),
+            physics_mass: Some(3270.0),
         },
         ApolloPart {
             name: "ascent_stage",
             shape: ApolloShape::Cylinder {
-                radius: 0.82,
-                height: 0.72,
+                radius: 1.64,
+                height: 1.44,
                 resolution: 8,
             },
             material: ApolloMaterial::Gold,
-            translation: Vec3::new(0.0, 1.5, 0.0),
+            translation: Vec3::new(0.0, 3.0, 0.0),
             rotation: Quat::from_rotation_y(std::f32::consts::PI / 8.0),
             scale: Vec3::new(1.0, 0.8, 0.92),
-            physics_mass: Some(420.0),
+            physics_mass: Some(3510.0),
         },
         ApolloPart {
             name: "docking_hatch",
             shape: ApolloShape::Cylinder {
-                radius: 0.38,
-                height: 0.28,
+                radius: 0.76,
+                height: 0.56,
                 resolution: 24,
             },
             material: ApolloMaterial::White,
-            translation: Vec3::new(0.0, 2.05, 0.0),
+            translation: Vec3::new(0.0, 4.1, 0.0),
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
-            physics_mass: Some(45.0),
+            physics_mass: Some(130.0),
         },
         ApolloPart {
             name: "front_window",
             shape: ApolloShape::Cuboid {
-                size: Vec3::new(0.74, 0.52, 0.08),
+                size: Vec3::new(1.48, 1.04, 0.16),
             },
             material: ApolloMaterial::Dark,
-            translation: Vec3::new(0.0, 0.78, 1.03),
+            translation: Vec3::new(0.0, 1.56, 2.06),
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
             physics_mass: None,
@@ -109,10 +114,10 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
         ApolloPart {
             name: "side_window",
             shape: ApolloShape::Cuboid {
-                size: Vec3::new(0.34, 0.42, 0.09),
+                size: Vec3::new(0.68, 0.84, 0.18),
             },
             material: ApolloMaterial::Dark,
-            translation: Vec3::new(0.48, 1.26, 0.78),
+            translation: Vec3::new(0.96, 2.52, 1.56),
             rotation: Quat::from_rotation_y(-0.32),
             scale: Vec3::ONE,
             physics_mass: None,
@@ -120,10 +125,10 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
         ApolloPart {
             name: "left_foil_panel",
             shape: ApolloShape::Cuboid {
-                size: Vec3::new(0.32, 0.86, 0.12),
+                size: Vec3::new(0.64, 1.72, 0.24),
             },
             material: ApolloMaterial::Gold,
-            translation: Vec3::new(-0.95, 0.55, 0.08),
+            translation: Vec3::new(-1.9, 1.1, 0.16),
             rotation: Quat::from_rotation_z(0.28),
             scale: Vec3::ONE,
             physics_mass: None,
@@ -131,19 +136,19 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
         ApolloPart {
             name: "right_foil_panel",
             shape: ApolloShape::Cuboid {
-                size: Vec3::new(0.32, 0.86, 0.12),
+                size: Vec3::new(0.64, 1.72, 0.24),
             },
             material: ApolloMaterial::Gold,
-            translation: Vec3::new(0.95, 0.55, -0.08),
+            translation: Vec3::new(1.9, 1.1, -0.16),
             rotation: Quat::from_rotation_z(-0.28),
             scale: Vec3::ONE,
             physics_mass: None,
         },
         ApolloPart {
             name: "dish",
-            shape: ApolloShape::Sphere { radius: 0.28 },
+            shape: ApolloShape::Sphere { radius: 0.56 },
             material: ApolloMaterial::Dark,
-            translation: Vec3::new(-1.18, 2.08, -0.78),
+            translation: Vec3::new(-2.36, 4.16, -1.56),
             rotation: Quat::IDENTITY,
             scale: Vec3::new(1.0, 0.12, 1.0),
             physics_mass: None,
@@ -151,12 +156,12 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
         ApolloPart {
             name: "dish_mount",
             shape: ApolloShape::Cylinder {
-                radius: 0.035,
-                height: 0.16,
+                radius: 0.07,
+                height: 0.32,
                 resolution: 10,
             },
             material: ApolloMaterial::Metal,
-            translation: Vec3::new(-1.18, 1.97, -0.78),
+            translation: Vec3::new(-2.36, 3.94, -1.56),
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
             physics_mass: None,
@@ -164,9 +169,9 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
         ApolloPart {
             name: "antenna_brace",
             shape: ApolloShape::Strut {
-                start: Vec3::new(-0.74, 1.72, -0.45),
-                end: Vec3::new(-1.12, 1.92, -0.74),
-                radius: 0.018,
+                start: Vec3::new(-1.48, 3.44, -0.9),
+                end: Vec3::new(-2.24, 3.84, -1.48),
+                radius: 0.036,
                 resolution: 8,
             },
             material: ApolloMaterial::Metal,
@@ -178,24 +183,27 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
         ApolloPart {
             name: "side_antenna",
             shape: ApolloShape::Cylinder {
-                radius: 0.08,
-                height: 0.7,
+                radius: 0.16,
+                height: 1.4,
                 resolution: 16,
             },
             material: ApolloMaterial::Metal,
-            translation: Vec3::new(0.72, 1.92, -0.35),
+            translation: Vec3::new(1.44, 3.84, -0.7),
             rotation: Quat::from_rotation_z(0.35),
             scale: Vec3::ONE,
             physics_mass: None,
         },
     ];
 
+    // Landing gear geometry constants scaled for the ~1:2→1:1 size correction.
+    // Direction angles place four legs at 45° diagonals relative to the body axes.
     for i in 0..4 {
         let angle = i as f32 * std::f32::consts::FRAC_PI_2 + std::f32::consts::PI / 4.0;
         let dir = Vec3::new(angle.cos(), 0.0, angle.sin());
-        let foot = dir * 2.05 + Vec3::new(0.0, -1.16, 0.0);
-        let leg_mount = dir * 1.02 + Vec3::new(0.0, 0.0, 0.0);
+        let foot = dir * 4.1 + Vec3::new(0.0, -2.32, 0.0);
+        let leg_mount = dir * 2.04 + Vec3::new(0.0, 0.0, 0.0);
 
+        // ~64 kg per landing strut (scaled to total landing mass).
         parts.push(ApolloPart {
             name: match i {
                 0 => "landing_strut_front_right",
@@ -206,16 +214,17 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
             shape: ApolloShape::Strut {
                 start: leg_mount,
                 end: foot,
-                radius: 0.035,
+                radius: 0.07,
                 resolution: 12,
             },
             material: ApolloMaterial::Metal,
             translation: Vec3::ZERO,
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
-            physics_mass: Some(24.0),
+            physics_mass: Some(64.0),
         });
 
+        // ~40 kg per footpad.
         parts.push(ApolloPart {
             name: match i {
                 0 => "foot_front_right",
@@ -224,15 +233,15 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
                 _ => "foot_front_left",
             },
             shape: ApolloShape::Cylinder {
-                radius: 0.38,
-                height: 0.09,
+                radius: 0.76,
+                height: 0.18,
                 resolution: 32,
             },
             material: ApolloMaterial::Foil,
             translation: foot,
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
-            physics_mass: Some(18.0),
+            physics_mass: Some(40.0),
         });
 
         parts.push(ApolloPart {
@@ -243,10 +252,10 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
                 _ => "leg_fairing_front_left",
             },
             shape: ApolloShape::Cuboid {
-                size: Vec3::new(0.2, 0.14, 0.18),
+                size: Vec3::new(0.4, 0.28, 0.36),
             },
             material: ApolloMaterial::Dark,
-            translation: leg_mount + dir * 0.08 + Vec3::new(0.0, 0.01, 0.0),
+            translation: leg_mount + dir * 0.16 + Vec3::new(0.0, 0.02, 0.0),
             rotation: Quat::from_rotation_y(-angle),
             scale: Vec3::ONE,
             physics_mass: None,
@@ -357,7 +366,8 @@ mod tests {
 
     #[test]
     fn landing_gear_starts_below_descent_stage_skirt() {
-        let descent_stage_bottom = 0.62 - 1.25 * 0.82 * 0.5;
+        // descent_stage translation.y=1.24, cylinder height=2.5, scale.y=0.82
+        let descent_stage_bottom = 1.24 - 2.5 * 0.82 * 0.5;
 
         for part in apollo_parts()
             .into_iter()
@@ -380,8 +390,9 @@ mod tests {
                 "{} should angle downward away from the lander",
                 part.name
             );
+            // Radial sweep must be at least 1.0 m outward (scaled from 0.5 m).
             assert!(
-                end_radial > start_radial + 0.5,
+                end_radial > start_radial + 1.0,
                 "{} should sweep outward toward the footpad",
                 part.name
             );
