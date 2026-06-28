@@ -3,8 +3,8 @@ use bevy::math::primitives::{Cone, Cylinder, Sphere};
 use bevy::prelude::*;
 use std::f32::consts::PI;
 
-pub const TARGET_FRAME_CENTER: Vec3 = Vec3::new(3.7, 2.35, -1.45);
-pub const TARGET_FRAME_AXIS_LENGTH: f32 = 1.8;
+pub const TARGET_FRAME_CENTER: Vec3 = Vec3::new(7.4, 4.7, -2.9);
+pub const TARGET_FRAME_AXIS_LENGTH: f32 = 3.6;
 
 pub struct ReferenceFrameMaterials {
     pub target_axis_x: Handle<StandardMaterial>,
@@ -19,7 +19,9 @@ pub struct ReferenceFrameMaterials {
 pub fn spawn_default_camera_and_light(commands: &mut Commands) {
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(5.2, 3.4, 7.0).looking_at(Vec3::new(0.0, 0.7, 0.0), Vec3::Y),
+        // Camera offset from the model CoM (~2.0 m) scaled 2× to match the
+        // rescaled lander geometry.
+        Transform::from_xyz(10.4, 7.4, 14.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y),
     ));
 
     commands.spawn((
@@ -97,12 +99,12 @@ pub fn spawn_stars(
     meshes: &mut Assets<Mesh>,
     material: Handle<StandardMaterial>,
 ) {
-    let star_mesh = meshes.add(Sphere::new(0.025).mesh().uv(8, 4));
+    let star_mesh = meshes.add(Sphere::new(0.05).mesh().uv(8, 4));
     for i in 0..80 {
         let fi = i as f32;
-        let x = (fi * 12.9898).sin() * 10.0;
-        let y = 2.8 + (fi * 78.233).sin().abs() * 4.5;
-        let z = -7.0 - (fi * 37.719).cos().abs() * 7.0;
+        let x = (fi * 12.9898).sin() * 20.0;
+        let y = 5.6 + (fi * 78.233).sin().abs() * 9.0;
+        let z = -14.0 - (fi * 37.719).cos().abs() * 14.0;
         commands.spawn((
             Mesh3d(star_mesh.clone()),
             MeshMaterial3d(material.clone()),

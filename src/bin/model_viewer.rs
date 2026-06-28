@@ -53,7 +53,8 @@ fn setup(
 fn spawn_viewer_camera_and_light(commands: &mut Commands) {
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(5.8, 3.4, 8.8).looking_at(Vec3::new(0.2, 1.55, 0.0), Vec3::Y),
+        // Scaled 2× to match the rescaled lander geometry.
+        Transform::from_xyz(11.6, 6.8, 17.6).looking_at(Vec3::new(0.4, 3.1, 0.0), Vec3::Y),
     ));
 
     commands.spawn((
