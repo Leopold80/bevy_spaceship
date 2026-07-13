@@ -1,0 +1,12 @@
+{
+  "rust-analyzer.cargo.extraEnv": {
+    "MUJOCO_DYNAMIC_LINK_DIR": "${workspaceFolder}/.local/mujoco/3.9.0/macos",
+    "DYLD_LIBRARY_PATH": "${workspaceFolder}/.local/mujoco/3.9.0/macos",
+    "DYLD_FRAMEWORK_PATH": "${workspaceFolder}/.local/mujoco/3.9.0/macos"
+  },
+  "rust-analyzer.check.extraEnv": {
+    "MUJOCO_DYNAMIC_LINK_DIR": "${workspaceFolder}/.local/mujoco/3.9.0/macos",
+    "DYLD_LIBRARY_PATH": "${workspaceFolder}/.local/mujoco/3.9.0/macos",
+    "DYLD_FRAMEWORK_PATH": "${workspaceFolder}/.local/mujoco/3.9.0/macos"
+  }
+}

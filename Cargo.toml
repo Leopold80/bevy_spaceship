@@ -6,3 +6,8 @@ default-run = "bevy_spacecraft"
 
 [dependencies]
 bevy = "0.19"
+glam = "0.32.1"
+mujoco_rs = { package = "mujoco-rs", version = "5.0.0", features = ["viewer-ui", "renderer-winit-fallback"] }
+
+[patch.crates-io]
+glutin = { git = "https://github.com/davidhozic/glutin", rev = "e95fe97f1857c0498ed2236c0e8d60e5a30a2854" }

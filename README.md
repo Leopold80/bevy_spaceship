@@ -1,12 +1,12 @@
 # Bevy Spacecraft
 
-基于 Bevy 的飞船强化学习/控制系统仿真可视化环境。当前版本包含 Apollo 风格登月舱资源、四元数姿态误差计算、运动学姿态控制律、日志验证和可视化演示。
+基于 Bevy 的飞船强化学习/控制系统仿真可视化环境。当前版本包含 Apollo 风格登月舱资源、Starship-inspired 不锈钢火箭外形资源、MuJoCo Apollo 6DoF 动力学实验、四元数姿态误差计算、运动学姿态控制律、日志验证和可视化演示。
 
 工程目标是把算法数学与 Bevy 场景细节分开：控制律和误差计算应能被控制/RL 实验直接调用，飞船造型资源应能单独查看和维护，演示程序则负责把二者组合成可视化验证环境。
 
 ## 运行入口
 
-只查看飞船模型和基础场景：
+只查看飞船模型和基础场景，当前会并排展示 Apollo 风格登月舱和 Starship-inspired 火箭模型：
 
 ```bash
 cargo run --bin model_viewer
@@ -16,6 +16,13 @@ cargo run --bin model_viewer
 
 ```bash
 cargo run --bin attitude_demo
+```
+
+运行 MuJoCo Apollo 6DoF 动力学演示：
+
+```bash
+source scripts/mujoco_env.zsh
+cargo run --bin mujoco_apollo_demo
 ```
 
 默认入口仍然指向姿态控制演示，因此下面的旧命令也可用：
@@ -52,52 +59,100 @@ omega_c = -kp * q_e0 * q_ev
 
 随着控制器收敛，当前坐标系应逐渐与期望坐标系重合。
 
-## 无图形界面的日志验证
+## MuJoCo Apollo 动力学实验
 
-当无法使用 GPU 渲染时，可以使用无图形界面模式。该模式默认记录 `q_e0 q_ev` 型反馈，作为与早期实验一致的基准：
-
-```bash
-cargo run --bin attitude_demo -- --headless-log
-```
-
-该命令会写入：
+MuJoCo 实验使用 `mujoco-rs`，macOS 下按 MuJoCo-rs 文档要求启用了 `renderer-winit-fallback`，并在 `Cargo.toml` 中 patch 了 `glutin`。MuJoCo 官方动态库不提交进仓库，推荐放在：
 
 ```text
-logs/attitude_kinematics.csv
+.local/mujoco/3.9.0/macos/
 ```
 
-期望的变化趋势：
-
-- `qe0 >= 0`，说明实现了 unwinding 避免机制。
-- `qev_norm` 逐渐减小并趋近于零。
-- `error_angle_rad` 逐渐减小并趋近于零。
-- `omega_norm` 随着误差缩小而减小。
-
-## 代码结构
-
-面向算法和工程维护的主要入口：
-
-- `src/attitude_control.rs`：与 Bevy 场景无关的控制律、四元数误差、误差角、积分函数和测试。
-- `src/spacecraft_model.rs`：Apollo 风格登月舱的几何造型、材质和 `spawn_lander` 入口。
-- `src/visualization.rs`：相机、光照、星空、目标/当前坐标系等可视化工具。
-- `src/attitude_log.rs`：CSV 日志和无图形界面验证。
-- `src/attitude_demo.rs`：姿态控制演示的 Bevy 系统、按键、HUD 和场景组合。
-- `src/bin/model_viewer.rs`：只展示模型的可执行入口。
-- `src/bin/attitude_demo.rs`：姿态控制演示的显式可执行入口。
-
-## 理论说明
-
-修正后的推导保存在：
+目录结构应包含：
 
 ```text
-docs/quaternion_attitude_control.md
+.local/mujoco/3.9.0/macos/mujoco.framework/
+.local/mujoco/3.9.0/macos/libmujoco.dylib
+.local/mujoco/3.9.0/macos/libmujoco.3.9.0.dylib
 ```
 
-## 检查
+其中 `libmujoco.dylib` 指向：
+
+```text
+mujoco.framework/Versions/A/libmujoco.3.9.0.dylib
+```
+
+从一个已下载好的 macOS framework 配置本仓库：
 
 ```bash
-cargo fmt --check
-cargo check --bins
-cargo test
-cargo run --bin attitude_demo -- --headless-log
+mkdir -p .local/mujoco/3.9.0/macos
+mv mujoco.framework .local/mujoco/3.9.0/macos/
+ln -sfn mujoco.framework/Versions/A/libmujoco.3.9.0.dylib .local/mujoco/3.9.0/macos/libmujoco.dylib
+ln -sfn mujoco.framework/Versions/A/libmujoco.3.9.0.dylib .local/mujoco/3.9.0/macos/libmujoco.3.9.0.dylib
+xattr -dr com.apple.quarantine .local/mujoco/3.9.0/macos/mujoco.framework
+codesign --force --deep --sign - .local/mujoco/3.9.0/macos/mujoco.framework
+source scripts/mujoco_env.zsh
 ```
+
+仓库的 `.vscode/settings.json` 已为 rust-analyzer 配置同一组 MuJoCo 环境变量，因此 VS Code 内部的 `cargo check` / `cargo clippy` 不需要额外手动 source 脚本。终端里直接运行 MuJoCo demo 或测试时仍建议先 source 上面的脚本。
+
+Apollo 模型现在以 `src/apollo_spec.rs` 中的 Rust 部件规格作为单一来源。Bevy 的 Apollo 可视化模型和 MuJoCo MJCF 都由这份规格生成，避免维护两套尺寸和坐标。MuJoCo 模型使用零重力、一个 freejoint 刚体，以及 body-frame 6D 外力/力矩输入。
+
+当前 MuJoCo Apollo demo 默认运行双层姿态控制：
+
+```text
+outer loop: q_e -> omega_c                 # 复用四元数运动学姿态控制律
+inner loop: omega_c - omega_body -> tau    # PID 角速度环输出 body-frame 力矩
+plant:      J * omega_dot + omega x Jomega = tau, integrated by MuJoCo
+```
+
+也就是说，PID 不再直接改运动学姿态积分，而是作为内层动力学控制器向 MuJoCo freejoint 刚体施加力矩。`R` 会重置 MuJoCo 状态和 PID 积分/微分历史。
+
+## 动力学 TODO 索引
+
+- MuJoCo/控制步长解耦（见 TODO section）
+- RCS 喷口控制分配：docs/rcs_thruster_allocation_dynamics_todo.md
+
+## TODO：将 MuJoCo 仿真/控制步长与 Bevy 渲染帧时间解耦
+
+当前的 MuJoCo-Bevy 联合方式主要面向实时可视化 demo。在 `mujoco_apollo_demo` 中，MuJoCo 的仿真推进依赖 Bevy 每一帧的 `delta time`，随后再把 MuJoCo 状态同步到 Bevy 的可视模型上。这样做适合快速演示，因为屏幕上的运动大致跟随真实时间。
+
+但是，这种设计不适合严格的控制算法验证。
+
+对于控制系统仿真，被控对象应当具有明确、固定的离散时间推进方式：
+
+```text
+x[k+1] = F(x[k], u[k], Δt)
+```
+
+其中仿真步长或控制步长 `Δt` 应该由控制实验本身定义，而不应该由渲染帧率决定。控制算法的效果不应依赖 GPU 负载、窗口刷新率、操作系统调度或临时卡顿。
+
+后续应当区分三种时间尺度：
+
+```text
+1. MuJoCo 仿真步长
+2. 控制器更新步长
+3. Bevy 渲染帧时间
+```
+
+例如：
+
+```text
+MuJoCo simulation dt:   0.002 s
+Controller dt:          0.020 s
+Control hold:           10 steps
+```
+
+在严格控制实验模式下，Bevy 不应该驱动物理时间，仅负责显示 MuJoCo 状态。
+
+推荐结构：
+
+```text
+src/mujoco_dynamics.rs
+src/control_env.rs
+src/bin/control_headless_demo.rs
+src/bin/control_visual_demo.rs
+```
+
+## 无图形界面日志验证
+
+当无法使用 GPU 时使用 headless 模式记录控制效果。

@@ -1,8 +1,9 @@
 use bevy::prelude::*;
-use bevy_spacecraft::spacecraft_model::{create_lander_materials, spawn_lander};
-use bevy_spacecraft::visualization::{
-    create_star_material, spawn_default_camera_and_light, spawn_stars,
+use bevy_spacecraft::spacecraft_model::{
+    create_lander_materials, spawn_lander,
 };
+use bevy_spacecraft::visualization::{create_star_material, spawn_stars};
+use std::f32::consts::PI;
 
 fn main() {
     App::new()
@@ -28,7 +29,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    spawn_default_camera_and_light(&mut commands);
+    spawn_viewer_camera_and_light(&mut commands);
 
     let lander_materials = create_lander_materials(&mut materials);
     let star = create_star_material(&mut materials);
@@ -38,6 +39,23 @@ fn setup(
         &mut commands,
         &mut meshes,
         &lander_materials,
-        Transform::from_xyz(0.0, 0.85, 0.0),
+        Transform::from_xyz(0.0, 0.65, 0.0).with_scale(Vec3::splat(0.82)),
     );
+}
+
+fn spawn_viewer_camera_and_light(commands: &mut Commands) {
+    commands.spawn((
+        Camera3d::default(),
+        // Scaled 2× to match the rescaled lander geometry.
+        Transform::from_xyz(11.6, 6.8, 17.6).looking_at(Vec3::new(0.4, 3.1, 0.0), Vec3::Y),
+    ));
+
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 22_000.0,
+            shadow_maps_enabled: true,
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -PI / 4.0, PI / 5.0, 0.0)),
+    ));
 }
