@@ -1,6 +1,6 @@
 use crate::attitude_control::{
-    ATTITUDE_KP, AttitudeScenario, ControlLaw, attitude_command, current_scenario,
-    desired_axis_angle, integrate_attitude, scenario_at, target_attitude,
+    ATTITUDE_KP, AttitudeScenario, attitude_command, current_scenario, desired_axis_angle,
+    integrate_attitude, scenario_at, target_attitude,
 };
 use crate::attitude_log::{AttitudeLog, LOG_INTERVAL_SECS, run_headless_attitude_log};
 use crate::spacecraft_model::{create_lander_materials, spawn_lander};
@@ -23,7 +23,6 @@ struct CurrentFrameRoot;
 struct AttitudeController {
     target: Quat,
     kp: f32,
-    control_law: ControlLaw,
     scenario_index: usize,
     paused: bool,
     elapsed_secs: f32,
@@ -56,7 +55,6 @@ pub fn run() {
         .insert_resource(AttitudeController {
             target: target_attitude(),
             kp: ATTITUDE_KP,
-            control_law: ControlLaw::ScaledQuaternion,
             scenario_index: 0,
             paused: false,
             elapsed_secs: 0.0,
@@ -118,7 +116,6 @@ fn setup(
             0.0,
             0.0,
             ATTITUDE_KP,
-            ControlLaw::ScaledQuaternion,
         )),
         TextFont::from_font_size(15.0),
         TextColor(Color::srgb(0.92, 0.96, 1.0)),
@@ -174,11 +171,6 @@ fn handle_attitude_demo_input(
         controller.paused = !controller.paused;
     }
 
-    if keyboard.just_pressed(KeyCode::KeyC) {
-        controller.control_law = controller.control_law.toggled();
-        selected_scenario = Some(controller.scenario_index);
-    }
-
     if let Some(index) = selected_scenario {
         reset_demo_run(index, &mut controller, &mut log, &mut query);
     }
@@ -198,12 +190,8 @@ fn control_lander_attitude(
     controller.elapsed_secs += dt;
 
     for mut transform in &mut query {
-        let (omega, mut sample) = attitude_command(
-            controller.target,
-            transform.rotation,
-            controller.kp,
-            controller.control_law,
-        );
+        let (omega, mut sample) =
+            attitude_command(controller.target, transform.rotation, controller.kp);
         transform.rotation = integrate_attitude(transform.rotation, omega, dt);
 
         if controller.elapsed_secs >= controller.next_log_secs {
@@ -235,15 +223,12 @@ fn status_text(
     elapsed_secs: f32,
     error_angle_rad: f32,
     kp: f32,
-    control_law: ControlLaw,
 ) -> String {
     let status = if paused { "PAUSED" } else { "CONVERGING" };
     let (desired_axis, desired_angle) = desired_axis_angle();
     format!(
-        "{status} | Mode: {mode} | Law: {formula} | Scenario: {scenario}\nTarget axis [{axis_x:.2}, {axis_y:.2}, {axis_z:.2}], {target_deg:.1} deg | Error {error_deg:.2} deg | t {elapsed_secs:.1}s | kp {kp:.2} | Space/R reset | 1/2/3 start | C switch law | P pause",
+        "{status} | Mode: fixed-gain q_ev feedback | Law: qe=qd^-1*q, qe0>=0, wc=-kp*qev | Scenario: {scenario}\nTarget axis [{axis_x:.2}, {axis_y:.2}, {axis_z:.2}], {target_deg:.1} deg | Error {error_deg:.2} deg | t {elapsed_secs:.1}s | kp {kp:.2} | Space/R reset | 1/2/3 start | P pause",
         scenario = scenario.name,
-        mode = control_law.name(),
-        formula = control_law.hud_formula(),
         error_deg = error_angle_rad.to_degrees(),
         axis_x = desired_axis.x,
         axis_y = desired_axis.y,
@@ -264,18 +249,12 @@ fn update_status_text(
         return;
     };
 
-    let (_, sample) = attitude_command(
-        controller.target,
-        transform.rotation,
-        controller.kp,
-        controller.control_law,
-    );
+    let (_, sample) = attitude_command(controller.target, transform.rotation, controller.kp);
     *text = Text::new(status_text(
         scenario_at(controller.scenario_index),
         controller.paused,
         controller.elapsed_secs,
         sample.error_angle_rad,
         controller.kp,
-        controller.control_law,
     ));
 }

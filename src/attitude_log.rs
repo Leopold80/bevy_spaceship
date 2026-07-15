@@ -1,6 +1,6 @@
 use crate::attitude_control::{
-    ATTITUDE_KP, AttitudeSample, ControlLaw, attitude_command, current_scenario,
-    integrate_attitude, target_attitude,
+    ATTITUDE_KP, AttitudeSample, attitude_command, current_scenario, integrate_attitude,
+    target_attitude,
 };
 use bevy::prelude::*;
 use std::fs::{File, create_dir_all};
@@ -59,8 +59,7 @@ pub fn run_headless_attitude_log(path: &str, duration_secs: f32, dt: f32) {
     let mut next_log_secs = 0.0;
 
     while elapsed_secs <= duration_secs {
-        let (omega, mut sample) =
-            attitude_command(target, current, ATTITUDE_KP, ControlLaw::ScaledQuaternion);
+        let (omega, mut sample) = attitude_command(target, current, ATTITUDE_KP);
 
         if elapsed_secs >= next_log_secs {
             sample.time_s = elapsed_secs;

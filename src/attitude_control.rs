@@ -1,35 +1,8 @@
 use glam::{EulerRot, Quat, Vec3};
 
+pub mod legacy;
+
 pub const ATTITUDE_KP: f32 = 2.4;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ControlLaw {
-    ScaledQuaternion,
-    FixedGain,
-}
-
-impl ControlLaw {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::ScaledQuaternion => "q_e0 q_ev feedback",
-            Self::FixedGain => "fixed-gain q_ev feedback",
-        }
-    }
-
-    pub fn hud_formula(self) -> &'static str {
-        match self {
-            Self::ScaledQuaternion => "qe=qd^-1*q, qe0>=0, wc=-kp*qe0*qev",
-            Self::FixedGain => "qe=qd^-1*q, qe0>=0, wc=-kp*qev",
-        }
-    }
-
-    pub fn toggled(self) -> Self {
-        match self {
-            Self::ScaledQuaternion => Self::FixedGain,
-            Self::FixedGain => Self::ScaledQuaternion,
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 pub struct AttitudeScenario {
@@ -69,12 +42,12 @@ fn attitude_scenarios() -> [AttitudeScenario; 3] {
             initial: Quat::from_euler(EulerRot::XYZ, -0.95, 0.72, 1.35).normalize(),
         },
         AttitudeScenario {
-            name: "2 Large compound error",
+            name: "2 Compound error (175.3 deg)",
             initial: Quat::from_axis_angle(Vec3::new(0.7, -0.25, 0.66).normalize(), 2.55)
                 * Quat::from_euler(EulerRot::XYZ, 0.45, -0.38, 0.2),
         },
         AttitudeScenario {
-            name: "3 Near 180 deg",
+            name: "3 Compound error (149.5 deg)",
             initial: Quat::from_axis_angle(Vec3::new(-0.35, 0.9, 0.27).normalize(), 3.05)
                 * Quat::from_rotation_z(-0.55),
         },
@@ -90,27 +63,21 @@ pub fn attitude_error(target: Quat, current: Quat) -> Quat {
     }
 }
 
-pub fn attitude_command(
-    target: Quat,
-    current: Quat,
-    kp: f32,
-    control_law: ControlLaw,
-) -> (Vec3, AttitudeSample) {
+pub fn attitude_command(target: Quat, current: Quat, kp: f32) -> (Vec3, AttitudeSample) {
     let error = attitude_error(target, current);
     let qev = Vec3::new(error.x, error.y, error.z);
-    let omega = match control_law {
-        ControlLaw::ScaledQuaternion => -kp * error.w * qev,
-        ControlLaw::FixedGain => -kp * qev,
-    };
-    let sample = AttitudeSample {
+    let omega = -kp * qev;
+    (omega, attitude_sample(error, omega))
+}
+
+fn attitude_sample(error: Quat, omega: Vec3) -> AttitudeSample {
+    AttitudeSample {
         time_s: 0.0,
         qe0: error.w,
-        qev_norm: qev.length(),
+        qev_norm: Vec3::new(error.x, error.y, error.z).length(),
         error_angle_rad: 2.0 * error.w.clamp(-1.0, 1.0).acos(),
         omega,
-    };
-
-    (omega, sample)
+    }
 }
 
 pub fn integrate_attitude(current: Quat, omega: Vec3, dt: f32) -> Quat {
@@ -122,47 +89,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kinematic_controller_reduces_attitude_error() {
+    fn fixed_gain_controller_reduces_all_scenario_errors() {
         let target = target_attitude();
-        let mut current = current_scenario().initial;
-        let (_, initial_sample) =
-            attitude_command(target, current, ATTITUDE_KP, ControlLaw::ScaledQuaternion);
+        for scenario in attitude_scenarios() {
+            let mut current = scenario.initial;
+            let (_, initial_sample) = attitude_command(target, current, ATTITUDE_KP);
 
-        for _ in 0..600 {
-            let (omega, _) =
-                attitude_command(target, current, ATTITUDE_KP, ControlLaw::ScaledQuaternion);
-            current = integrate_attitude(current, omega, 1.0 / 60.0);
+            for _ in 0..600 {
+                let (omega, _) = attitude_command(target, current, ATTITUDE_KP);
+                current = integrate_attitude(current, omega, 1.0 / 60.0);
+            }
+
+            let (_, final_sample) = attitude_command(target, current, ATTITUDE_KP);
+            assert!(initial_sample.qe0 >= 0.0, "{}", scenario.name);
+            assert!(final_sample.qe0 >= 0.0, "{}", scenario.name);
+            assert!(
+                final_sample.error_angle_rad < initial_sample.error_angle_rad,
+                "{}",
+                scenario.name
+            );
+            assert!(final_sample.qev_norm < 0.001, "{}", scenario.name);
         }
-
-        let (_, final_sample) =
-            attitude_command(target, current, ATTITUDE_KP, ControlLaw::ScaledQuaternion);
-
-        assert!(initial_sample.qe0 >= 0.0);
-        assert!(final_sample.qe0 >= 0.0);
-        assert!(final_sample.qev_norm < initial_sample.qev_norm);
-        assert!(final_sample.error_angle_rad < initial_sample.error_angle_rad);
-        assert!(final_sample.qev_norm < 0.001);
     }
 
     #[test]
-    fn fixed_gain_controller_reduces_attitude_error() {
+    fn scenario_names_match_target_relative_error_angles() {
         let target = target_attitude();
-        let mut current = current_scenario().initial;
-        let (_, initial_sample) =
-            attitude_command(target, current, ATTITUDE_KP, ControlLaw::FixedGain);
+        let scenario_two_error = attitude_command(target, scenario_at(1).initial, ATTITUDE_KP)
+            .1
+            .error_angle_rad
+            .to_degrees();
+        let scenario_three_error = attitude_command(target, scenario_at(2).initial, ATTITUDE_KP)
+            .1
+            .error_angle_rad
+            .to_degrees();
 
-        for _ in 0..600 {
-            let (omega, _) = attitude_command(target, current, ATTITUDE_KP, ControlLaw::FixedGain);
-            current = integrate_attitude(current, omega, 1.0 / 60.0);
-        }
-
-        let (_, final_sample) =
-            attitude_command(target, current, ATTITUDE_KP, ControlLaw::FixedGain);
-
-        assert!(initial_sample.qe0 >= 0.0);
-        assert!(final_sample.qe0 >= 0.0);
-        assert!(final_sample.qev_norm < initial_sample.qev_norm);
-        assert!(final_sample.error_angle_rad < initial_sample.error_angle_rad);
-        assert!(final_sample.qev_norm < 0.001);
+        assert!((scenario_two_error - 175.3).abs() < 0.1);
+        assert!((scenario_three_error - 149.5).abs() < 0.1);
     }
 }

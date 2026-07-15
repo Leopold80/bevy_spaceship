@@ -5,19 +5,25 @@ pub const APOLLO_BODY_NAME: &str = "apollo_lander";
 pub const APOLLO_FREEJOINT_NAME: &str = "apollo_freejoint";
 pub const APOLLO_MUJOCO_TIMESTEP_SECS: f64 = 0.002;
 
-/// Apollo 11 LM lunar-landing diagonal moment-of-inertia (kg·m²).
+/// Apollo 11 LM 实际着陆工况质量属性。
 ///
-/// source: SNA-8-D-027III Rev.2 CSM/LM Spacecraft Operational Data Book
-/// Vol.3, Apollo 11 Mission Report Appendix A.6.  Original values in
-/// slug-ft² converted to SI (1 slug-ft² = 1.35581795 kg·m²).
+/// 数据源：NASA NTRS 20260000331, *Apollo 11 Lunar Module Touchdown
+/// Dynamics Reconstruction Verification and Validation for Human Landing Systems*,
+/// Table 1 的 Apollo 11 实际轻载着陆列。
 ///
-/// Coordinate mapping: LM (X fwd, Y right, Z down) → code (X right, Y up, Z fwd).
-///   code Ixx = LM Iyy = 13 867 slug-ft² → 18 801 kg·m²
-///   code Iyy = LM Izz = 16 204 slug-ft² → 21 970 kg·m²
-///   code Izz = LM Ixx = 12 582 slug-ft² → 17 059 kg·m²
-pub const APOLLO_IXX: f32 = 18_801.0;
-pub const APOLLO_IYY: f32 = 21_970.0;
-pub const APOLLO_IZZ: f32 = 17_059.0;
+/// NASA LM 本体轴定义：X 垂直向上、Y 横向向右、Z 向前。
+/// 本项目模型轴定义：X 向右、Y 向上、Z 向前。因此映射为：
+///   code Ixx = LM Iyy
+///   code Iyy = LM Ixx
+///   code Izz = LM Izz
+pub const APOLLO_TOUCHDOWN_MASS_KG: f32 = 4_932.0;
+const APOLLO_LM_IXX_VERTICAL: f32 = 7_953.0;
+const APOLLO_LM_IYY_LATERAL: f32 = 6_332.0;
+const APOLLO_LM_IZZ_FORWARD: f32 = 5_879.0;
+
+pub const APOLLO_IXX: f32 = APOLLO_LM_IYY_LATERAL;
+pub const APOLLO_IYY: f32 = APOLLO_LM_IXX_VERTICAL;
+pub const APOLLO_IZZ: f32 = APOLLO_LM_IZZ_FORWARD;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApolloMaterial {
@@ -70,11 +76,8 @@ impl ApolloPart {
 
 pub fn apollo_parts() -> Vec<ApolloPart> {
     let mut parts = vec![
-        // Apollo LM at lunar landing: ~7,327 kg total. Masses are scaled so
-        // that the MuJoCo-computed body mass matches that figure.
-        // The dry masses below are the real Apollo LM breakdown; the
-        // 1.6× multiplier accounts for propellant, crew, and consumables
-        // still aboard at landing.
+        // 下列数值作为当前粗略部件模型的相对质量权重；函数返回前会按
+        // NASA Apollo 11 实际着陆总质量统一归一化，保留现有质心分布。
         ApolloPart {
             name: "descent_stage",
             shape: ApolloShape::Cylinder {
@@ -248,7 +251,7 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
         let foot = dir * 4.1 + Vec3::new(0.0, -2.32, 0.0);
         let leg_mount = dir * 2.04 + Vec3::new(0.0, 0.0, 0.0);
 
-        // ~64 kg per landing strut (scaled to total landing mass).
+        // 原始权重 64，整机归一化后每根约 43.1 kg。
         parts.push(ApolloPart {
             name: match i {
                 0 => "landing_strut_front_right",
@@ -269,7 +272,7 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
             physics_mass: Some(64.0),
         });
 
-        // ~40 kg per footpad.
+        // 原始权重 40，整机归一化后每个约 26.9 kg。
         parts.push(ApolloPart {
             name: match i {
                 0 => "foot_front_right",
@@ -305,6 +308,14 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
             scale: Vec3::ONE,
             physics_mass: None,
         });
+    }
+
+    let raw_total_mass: f32 = parts.iter().filter_map(|part| part.physics_mass).sum();
+    let mass_scale = APOLLO_TOUCHDOWN_MASS_KG / raw_total_mass;
+    for part in &mut parts {
+        if let Some(mass) = &mut part.physics_mass {
+            *mass *= mass_scale;
+        }
     }
 
     parts
@@ -475,6 +486,16 @@ mod tests {
         assert!(xml.contains(APOLLO_BODY_NAME));
         assert!(xml.contains(APOLLO_FREEJOINT_NAME));
         assert!(xml.contains("descent_stage"));
+        assert!(xml.contains("mass=\"4932.000\""));
+        assert!(xml.contains("diaginertia=\"6332 7953 5879\""));
+    }
+
+    #[test]
+    fn nasa_apollo_11_touchdown_inertia_axes_map_to_model_axes() {
+        // NASA LM: X 垂直、Y 横向、Z 向前；模型：X 横向、Y 垂直、Z 向前。
+        assert_eq!(APOLLO_IXX, APOLLO_LM_IYY_LATERAL);
+        assert_eq!(APOLLO_IYY, APOLLO_LM_IXX_VERTICAL);
+        assert_eq!(APOLLO_IZZ, APOLLO_LM_IZZ_FORWARD);
     }
 
     #[test]
@@ -542,7 +563,7 @@ mod tests {
 
         assert!(interstage_part.physics_mass.is_none());
         assert!(docking_adapter_part.physics_mass.is_none());
-        assert_eq!(total_physics_mass(), 7326.0);
+        assert!((total_physics_mass() - APOLLO_TOUCHDOWN_MASS_KG).abs() < 0.01);
 
         let xml = apollo_mjcf_xml();
         assert!(!xml.contains("interstage_adapter"));

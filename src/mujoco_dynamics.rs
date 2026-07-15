@@ -215,14 +215,27 @@ mod tests {
         let com_y = ipos[1];
         let com_z = ipos[2];
 
-        use crate::apollo_spec::{APOLLO_IXX, APOLLO_IYY, APOLLO_IZZ, center_of_mass, total_physics_mass};
+        use crate::apollo_spec::{
+            APOLLO_IXX, APOLLO_IYY, APOLLO_IZZ, center_of_mass, total_physics_mass,
+        };
 
         println!();
         println!("===== Apollo Lander Mass Properties (MuJoCo computed) =====");
-        println!("Mass:  {:.1} kg  (from parts: {:.1})", mass, total_physics_mass());
+        println!(
+            "Mass:  {:.1} kg  (from parts: {:.1})",
+            mass,
+            total_physics_mass()
+        );
         let com = center_of_mass();
-        println!("CoM (body frame):  ({:.3}, {:.3}, {:.3})  (from parts: {com_x:.3}, {com_y:.3}, {com_z:.3})",
-                 com_x, com_y, com_z, com_x=com.x, com_y=com.y, com_z=com.z);
+        println!(
+            "CoM (body frame):  ({:.3}, {:.3}, {:.3})  (from parts: {com_x:.3}, {com_y:.3}, {com_z:.3})",
+            com_x,
+            com_y,
+            com_z,
+            com_x = com.x,
+            com_y = com.y,
+            com_z = com.z
+        );
         println!("Inertia (body diagonal, about CoM):");
         println!("  Ixx = {:10.1}  (Apollo 11 target: {})", ixx, APOLLO_IXX);
         println!("  Iyy = {:10.1}  (Apollo 11 target: {})", iyy, APOLLO_IYY);
@@ -233,8 +246,12 @@ mod tests {
         println!("Inertia is set by <inertial diaginertia> using Apollo 11 constants.");
         println!();
 
-        assert!(mass > 1000.0, "mass should be in the ton range");
-        assert!(ixx > 1000.0 && iyy > 1000.0 && izz > 1000.0,
-                "inertia should be in the thousands");
+        assert!((mass - total_physics_mass() as f64).abs() < 1e-6);
+        assert!(
+            (ixx - APOLLO_IXX as f64).abs() < 1e-6
+                && (iyy - APOLLO_IYY as f64).abs() < 1e-6
+                && (izz - APOLLO_IZZ as f64).abs() < 1e-6,
+            "MuJoCo 应当使用映射后的 Apollo 11 实际着陆惯量"
+        );
     }
 }

@@ -1,5 +1,5 @@
 use crate::apollo_timing::APOLLO_CONTROLLER_TIMESTEP_SECS;
-use crate::attitude_control::{ControlLaw, attitude_command, attitude_error, target_attitude};
+use crate::attitude_control::{attitude_command, attitude_error, target_attitude};
 use crate::mujoco_dynamics::{ApolloDynamicsState, ApolloWrench};
 use glam::{Quat, Vec3};
 use std::f32::consts::PI;
@@ -41,6 +41,9 @@ pub struct AttitudeRatePidGains {
     pub derivative_filter_q: f32,
     /// 积分向量幅值限制。
     pub integral_limit: f32,
+    /// 抗积分饱和回算跟踪时间常数。越小越快将未限幅力矩拉回
+    /// 可实现区域，但不应小于一个控制周期。
+    pub anti_windup_tracking_time_secs: f32,
     /// 机体系力矩幅值限制。
     pub torque_limit: f32,
 }
@@ -48,8 +51,8 @@ pub struct AttitudeRatePidGains {
 impl Default for AttitudeRatePidGains {
     fn default() -> Self {
         Self {
-            // kp 随转动惯量线性缩放。I ≈ 24 000 kg·m² (MuJoCo 实测)，
-            // 目标 α ≈ 1.75 rad/s² per 1 rad/s 速度误差。
+            // 当前 Apollo 11 实际着陆惯量为 5 879–7 953 kg·m²。这组连续
+            // 理想力矩 baseline 保留较高的角加速度余量，后续将由真实 RCS 约束取代。
             kp: 42_000.0,
             // 积分项只负责很小的稳态残差，不把它当成主要收敛通道。
             // 与 kp 同比例缩放以保持积分-比例力矩比不变。
@@ -62,6 +65,7 @@ impl Default for AttitudeRatePidGains {
             derivative_filter_cutoff_hz: 5.0,
             derivative_filter_q: 0.62,
             integral_limit: 6.4,
+            anti_windup_tracking_time_secs: 0.25,
             torque_limit: 52_000.0,
         }
     }
@@ -79,7 +83,6 @@ impl Default for AttitudeRatePidGains {
 pub struct CascadedAttitudeController {
     target: Quat,
     outer_kp: f32,
-    outer_law: ControlLaw,
     max_rate_command: f32,
     rate_gains: AttitudeRatePidGains,
     rate_error_integral: Vec3,
@@ -95,7 +98,6 @@ impl Default for CascadedAttitudeController {
             // 外环比旧值 3.2 略激进，提高大姿态误差时的收敛速度。
             // 真正防止过冲的是 max_rate_command 和内环阻尼，而不是把外环调慢。
             outer_kp: 5.0,
-            outer_law: ControlLaw::FixedGain,
             max_rate_command: 1.35,
             rate_gains,
             rate_error_integral: Vec3::ZERO,
@@ -110,10 +112,9 @@ impl Default for CascadedAttitudeController {
 }
 
 impl CascadedAttitudeController {
-    pub fn new(target: Quat, outer_law: ControlLaw, rate_gains: AttitudeRatePidGains) -> Self {
+    pub fn new(target: Quat, rate_gains: AttitudeRatePidGains) -> Self {
         Self {
             target,
-            outer_law,
             rate_gains,
             omega_derivative_filter: Vec3BiquadLowPass::new_low_pass(
                 APOLLO_CONTROLLER_TIMESTEP_SECS,
@@ -146,19 +147,29 @@ impl CascadedAttitudeController {
         let torque_without_integral = self.rate_gains.kp * rate_error_body
             - self.rate_gains.kd * omega_derivative
             - self.rate_gains.angular_damping * omega_body;
-        let candidate_torque =
-            torque_without_integral + self.rate_gains.ki * candidate_integral;
+        let unsaturated_torque = torque_without_integral + self.rate_gains.ki * candidate_integral;
+        let saturated_torque =
+            clamp_vector_length(unsaturated_torque, self.rate_gains.torque_limit);
 
-        // 条件积分：如果未饱和，接受新的积分状态；如果力矩已经饱和，冻结
-        // 积分，避免大姿态误差阶段 windup，随后在进入线性区后再恢复积分。
-        let torque = if vector_length_exceeds(candidate_torque, self.rate_gains.torque_limit) {
-            torque_without_integral + self.rate_gains.ki * self.rate_error_integral
-        } else {
-            self.rate_error_integral = candidate_integral;
-            candidate_torque
-        };
+        // 回算抗饱和：将限幅前后的力矩差折算回积分状态。
+        // 与原先的“饱和即冻结”不同，这会在误差反向时继续解除已有积分，
+        // 也会把积分器跟踪到执行器实际可实现的力矩范围。
+        let mut corrected_integral = candidate_integral;
+        if vector_length_exceeds(unsaturated_torque, self.rate_gains.torque_limit)
+            && self.rate_gains.ki.abs() > f32::EPSILON
+        {
+            let tracking_time = self.rate_gains.anti_windup_tracking_time_secs.max(dt);
+            let tracking_ratio = dt / tracking_time;
+            corrected_integral +=
+                tracking_ratio * (saturated_torque - unsaturated_torque) / self.rate_gains.ki;
+        }
+        self.rate_error_integral =
+            clamp_vector_length(corrected_integral, self.rate_gains.integral_limit);
 
-        clamp_vector_length(torque, self.rate_gains.torque_limit)
+        clamp_vector_length(
+            torque_without_integral + self.rate_gains.ki * self.rate_error_integral,
+            self.rate_gains.torque_limit,
+        )
     }
 
     fn filtered_omega_derivative(&mut self, omega_body: Vec3, dt: f32) -> Vec3 {
@@ -175,8 +186,7 @@ impl ApolloController for CascadedAttitudeController {
     fn update(&mut self, state: ApolloDynamicsState, _sim_time_secs: f32) -> ApolloWrench {
         // 外层：复用四元数运动学姿态控制律生成期望角速度。这里得到的
         // 仍然只是指令，不是被控对象输入；MuJoCo 被控对象接收的是力/力矩。
-        let (omega_command_body, _) =
-            attitude_command(self.target, state.rotation, self.outer_kp, self.outer_law);
+        let (omega_command_body, _) = attitude_command(self.target, state.rotation, self.outer_kp);
         let omega_command_body = clamp_vector_length(omega_command_body, self.max_rate_command);
 
         // MuJoCo freejoint 的旋转 qvel 原生就在机体局部坐标系中表达。
@@ -294,10 +304,10 @@ mod tests {
             derivative_filter_cutoff_hz: 5.0,
             derivative_filter_q: 0.62,
             integral_limit: 10.0,
+            anti_windup_tracking_time_secs: 0.25,
             torque_limit: 10.0,
         };
-        let mut controller =
-            CascadedAttitudeController::new(rotation, ControlLaw::FixedGain, gains);
+        let mut controller = CascadedAttitudeController::new(rotation, gains);
 
         let wrench = controller.update(
             ApolloDynamicsState {
@@ -363,12 +373,43 @@ mod tests {
 
     #[test]
     fn biquad_low_pass_keeps_step_response_finite() {
-        let mut filter = Vec3BiquadLowPass::new_low_pass(APOLLO_CONTROLLER_TIMESTEP_SECS, 5.0, 0.62);
+        let mut filter =
+            Vec3BiquadLowPass::new_low_pass(APOLLO_CONTROLLER_TIMESTEP_SECS, 5.0, 0.62);
         let mut output = Vec3::ZERO;
         for _ in 0..120 {
             output = filter.update(Vec3::new(1.0, -2.0, 0.5));
             assert!(output.is_finite());
         }
         assert!(output.distance(Vec3::new(1.0, -2.0, 0.5)) < 1e-3);
+    }
+
+    #[test]
+    fn back_calculation_unwinds_integral_when_saturated_error_reverses() {
+        let gains = AttitudeRatePidGains {
+            kp: 0.0,
+            ki: 10.0,
+            kd: 0.0,
+            angular_damping: 0.0,
+            derivative_filter_cutoff_hz: 5.0,
+            derivative_filter_q: 0.62,
+            integral_limit: 10.0,
+            anti_windup_tracking_time_secs: 0.10,
+            torque_limit: 1.0,
+        };
+        let mut controller = CascadedAttitudeController::new(Quat::IDENTITY, gains);
+
+        let mut torque = Vec3::ZERO;
+        for _ in 0..100 {
+            torque = controller.rate_pid_torque(Vec3::X, Vec3::ZERO);
+        }
+        assert!(torque.x > 0.99);
+
+        for _ in 0..20 {
+            torque = controller.rate_pid_torque(-Vec3::X, Vec3::ZERO);
+        }
+        assert!(
+            torque.x < 0.0,
+            "反向误差应当解除已有积分，实际力矩为 {torque:?}"
+        );
     }
 }

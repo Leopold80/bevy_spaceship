@@ -43,18 +43,19 @@ cargo run
 ```text
 q_e = q_d^-1 * q
 if q_e0 < 0, q_e = -q_e
-omega_c = -kp * q_e0 * q_ev
+omega_c = -kp * q_ev
 ```
 
 该实现有意只建模运动学部分。它不包含刚体动力学、转动惯量、执行器力矩、饱和约束，也不包含内层角速度控制环。
 
-技术文档中同时整理了 `q_e0 q_ev` 型反馈证明，以及作为工程对照的常增益 `q_ev` 型反馈证明。可视化演示支持在两种控制律之间切换。
+当前运动学演示和 MuJoCo 级联控制器都只使用常增益
+`omega_c = -kp * q_ev` 反馈。`q_e0 q_ev` 缩放反馈仅保留在
+`attitude_control::legacy` 中作为理论和回归对照，不再进入任何运行时控制路径。
 
 可视化演示中的控制按键：
 
 - `Space` 或 `R`：重置当前场景。
 - `1`、`2`、`3`：在几个可重复的初始姿态场景之间切换。
-- `C`：在 `omega_c = -kp * q_e0 * q_ev` 与固定增益 `omega_c = -kp * q_ev` 两种控制律之间切换。
 - `P`：暂停或继续收敛过程。
 
 右侧叠加显示区域会在同一个原点处显示两个坐标系：
@@ -89,6 +90,7 @@ mujoco.framework/Versions/A/libmujoco.3.9.0.dylib
 仓库的 `.vscode/settings.json` 已为 rust-analyzer 配置等效的 MuJoCo 链接环境，因此 VS Code 内部的 `cargo check` / `cargo clippy` 不需要额外手动 source 脚本。终端中的 Cargo 构建、运行和测试则应先从仓库根目录执行 `source scripts/mujoco_env.zsh`。
 
 两端共用 `src/apollo_spec.rs` 中的 Apollo 部件表。Bevy 遍历全部部件生成可视外形；MuJoCo MJCF 只使用其中标记了物理质量的部件作为外形子集，整机惯性属性另由显式 `<inertial>` 指定。当前 MuJoCo 被控对象是零重力、一个 freejoint 的单刚体，接口接收 body-frame 6D 外力/力矩；默认姿态控制器只输出力矩。它尚不包含月球重力、月面接触、DPS/APS/RCS 执行器、推进剂消耗或变质量。
+固定质量属性采用 NASA Apollo 11 实际轻载着陆工况：整机 `4932 kg`，项目轴 `X右/Y上/Z前` 下的对角惯量为 `(6332, 7953, 5879) kg·m²`。
 
 当前 MuJoCo Apollo 外形单刚体 demo 默认运行双层姿态控制：
 
@@ -98,7 +100,7 @@ inner loop: omega_c - omega_body -> tau    # PI-D 角速度环输出 body-frame 
 plant:      J * omega_dot + omega x Jomega = tau, integrated by MuJoCo
 ```
 
-也就是说，内环不再直接改运动学姿态积分，而是向 MuJoCo freejoint 刚体施加力矩。当前内环对角速度误差使用 PI，D 项作用于测量角速度微分，另有显式角速度阻尼、条件积分和幅值限制。`R` 会重置 MuJoCo 状态和内环积分/微分历史。
+也就是说，内环不再直接改运动学姿态积分，而是向 MuJoCo freejoint 刚体施加力矩。当前内环对角速度误差使用 PI，D 项作用于测量角速度微分，另有显式角速度阻尼、回算抗积分饱和和幅值限制。`R` 会重置 MuJoCo 状态和内环积分/微分历史。
 
 ### 坐标系约定与挑战收敛场景
 

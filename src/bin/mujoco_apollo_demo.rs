@@ -36,6 +36,7 @@ fn main() {
         })
         .insert_resource(ApolloStateResource(shared_state))
         .add_systems(Startup, setup)
+        // MuJoCo 线程独立推进物理；Bevy 在每个可变渲染帧读取最新快照。
         .add_systems(Update, (handle_input, sync_visual_from_simulation).chain())
         .run();
 }
@@ -74,7 +75,7 @@ fn setup(
 
     commands.spawn((
         Text::new(
-            "MuJoCo Apollo single rigid body | non-aligned initial attitude + body rate | quaternion outer loop + PI-D rate torque | R reset",
+            "MuJoCo Apollo single rigid body | non-aligned initial attitude + body rate | fixed-gain quaternion outer loop + PI-D rate torque | R reset",
         ),
         TextFont::from_font_size(16.0),
         TextColor(Color::srgb(0.92, 0.96, 1.0)),
