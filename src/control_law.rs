@@ -179,9 +179,9 @@ impl ApolloController for CascadedAttitudeController {
             attitude_command(self.target, state.rotation, self.outer_kp, self.outer_law);
         let omega_command_body = clamp_vector_length(omega_command_body, self.max_rate_command);
 
-        // MuJoCo 读出的 freejoint 角速度是世界系表达。我们施加的是机体系
-        // wrench，因此角速度反馈也转换到与力矩指令一致的机体系中计算。
-        let omega_body = state.rotation.inverse() * state.angular_velocity;
+        // MuJoCo freejoint 的旋转 qvel 原生就在机体局部坐标系中表达。
+        // 这里直接作为机体系角速度使用，不再做姿态逆旋转。
+        let omega_body = state.angular_velocity;
         let rate_error_body = omega_command_body - omega_body;
 
         ApolloWrench {
@@ -278,31 +278,87 @@ fn vector_length_exceeds(value: Vec3, max_length: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control_env::{APOLLO_CONTROLLER_DT_SECS, ApolloControlEnv};
+    use crate::control_env::{
+        APOLLO_CONTROLLER_DT_SECS, ApolloControlEnv, apollo_demo_initial_state,
+    };
     use crate::mujoco_dynamics::ApolloDynamics;
 
     #[test]
+    fn freejoint_body_rate_is_not_rotated_twice() {
+        let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let gains = AttitudeRatePidGains {
+            kp: 1.0,
+            ki: 0.0,
+            kd: 0.0,
+            angular_damping: 0.0,
+            derivative_filter_cutoff_hz: 5.0,
+            derivative_filter_q: 0.62,
+            integral_limit: 10.0,
+            torque_limit: 10.0,
+        };
+        let mut controller =
+            CascadedAttitudeController::new(rotation, ControlLaw::FixedGain, gains);
+
+        let wrench = controller.update(
+            ApolloDynamicsState {
+                position: Vec3::ZERO,
+                rotation,
+                linear_velocity: Vec3::ZERO,
+                // MuJoCo freejoint 旋转 qvel：机体系 +X。
+                angular_velocity: Vec3::X,
+            },
+            0.0,
+        );
+
+        assert!(wrench.torque_body.distance(-Vec3::X) < 1e-6);
+    }
+
+    #[test]
     fn cascaded_attitude_controller_reduces_mujoco_attitude_error() {
-        let dynamics = ApolloDynamics::new().expect("Apollo MuJoCo model should load");
+        let mut dynamics = ApolloDynamics::new().expect("Apollo MuJoCo model should load");
+        dynamics.reset_to_state(apollo_demo_initial_state());
         let controller = CascadedAttitudeController::default();
         let mut env = ApolloControlEnv::new(dynamics, APOLLO_CONTROLLER_DT_SECS, controller)
             .expect("controller dt should align with simulation dt");
 
+        let initial_state = env.snapshot().state;
         let initial_error = attitude_error(target_attitude(), env.snapshot().state.rotation);
         let initial_error_angle = 2.0 * initial_error.w.clamp(-1.0, 1.0).acos();
 
+        assert!(initial_state.rotation.dot(Quat::IDENTITY).abs() < 0.99);
+        assert!(initial_state.angular_velocity.length() > 0.1);
+        assert!(
+            initial_state
+                .rotation
+                .to_scaled_axis()
+                .cross(initial_state.angular_velocity)
+                .length()
+                > 0.1
+        );
+
         let mut snapshot = env.snapshot();
-        for _ in 0..1500 {
+        let mut two_second_error_angle = None;
+        let mut two_second_rate_norm = None;
+        for tick in 0..1500 {
             snapshot = env.step_control_tick();
+            if tick == 99 {
+                let error = attitude_error(target_attitude(), snapshot.state.rotation);
+                two_second_error_angle = Some(2.0 * error.w.clamp(-1.0, 1.0).acos());
+                two_second_rate_norm = Some(snapshot.state.angular_velocity.length());
+            }
         }
 
         let final_error = attitude_error(target_attitude(), snapshot.state.rotation);
         let final_error_angle = 2.0 * final_error.w.clamp(-1.0, 1.0).acos();
         assert!(snapshot.state.rotation.is_finite());
         assert!(snapshot.state.angular_velocity.is_finite());
+        // 2 s 短时窗检查挑战场景的瞬态收敛。旧的重复坐标变换即使
+        // 最终也能收敛，此时的姿态误差和角速度仍会明显过大。
+        assert!(two_second_error_angle.expect("2 s checkpoint should be recorded") < 0.10);
+        assert!(two_second_rate_norm.expect("2 s checkpoint should be recorded") < 0.50);
         assert!(final_error_angle < initial_error_angle * 0.20);
-        // 放宽到 0.10 rad (5.7°) 以适应缩放后的惯量和增益。
-        assert!(final_error_angle < 0.10);
+        assert!(final_error_angle < 0.05);
+        assert!(snapshot.state.angular_velocity.length() < 0.05);
     }
 
     #[test]

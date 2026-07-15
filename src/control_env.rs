@@ -1,11 +1,26 @@
 use crate::control_law::{ApolloController, CascadedAttitudeController};
 use crate::mujoco_dynamics::{ApolloDynamics, ApolloDynamicsState, ApolloWrench};
+use glam::{EulerRot, Quat, Vec3};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub const APOLLO_CONTROLLER_DT_SECS: f32 = 0.020;
+
+/// MuJoCo 姿态控制 demo 的固定挑战初始状态。
+///
+/// 非恒等姿态和与姿态旋转轴不对齐的机体系初始角速度，会让
+/// 坐标系反馈错误在收敛瞬态中直接暴露，而不再被“恒等姿态到单轴目标”掩盖。
+pub fn apollo_demo_initial_state() -> ApolloDynamicsState {
+    ApolloDynamicsState {
+        position: Vec3::ZERO,
+        rotation: Quat::from_euler(EulerRot::XYZ, -0.85, 0.55, 1.25).normalize(),
+        linear_velocity: Vec3::ZERO,
+        // MuJoCo freejoint 的旋转 qvel 在机体局部坐标系中表达。
+        angular_velocity: Vec3::new(0.55, -0.35, 0.25),
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct ApolloControlSnapshot {
@@ -23,6 +38,7 @@ struct SharedApolloInner {
 pub struct ApolloControlEnv<C: ApolloController> {
     dynamics: ApolloDynamics,
     controller: C,
+    initial_state: ApolloDynamicsState,
     controller_dt_secs: f32,
     control_hold_steps: usize,
     sim_time_secs: f32,
@@ -37,6 +53,7 @@ impl<C: ApolloController> ApolloControlEnv<C> {
         controller: C,
     ) -> Result<Self, String> {
         let simulation_dt_secs = dynamics.simulation_dt_secs();
+        let initial_state = dynamics.state();
         let control_hold_steps =
             fixed_hold_steps(simulation_dt_secs, controller_dt_secs).ok_or_else(|| {
                 format!(
@@ -47,6 +64,7 @@ impl<C: ApolloController> ApolloControlEnv<C> {
         Ok(Self {
             dynamics,
             controller,
+            initial_state,
             controller_dt_secs,
             control_hold_steps,
             sim_time_secs: 0.0,
@@ -72,7 +90,7 @@ impl<C: ApolloController> ApolloControlEnv<C> {
     }
 
     pub fn reset(&mut self) -> ApolloControlSnapshot {
-        self.dynamics.reset();
+        self.dynamics.reset_to_state(self.initial_state);
         self.controller.reset();
         self.sim_time_secs = 0.0;
         self.control_tick = 0;
@@ -125,7 +143,8 @@ pub struct SharedApolloState {
 
 impl SharedApolloState {
     pub fn start() -> Result<Self, String> {
-        let dynamics = ApolloDynamics::new()?;
+        let mut dynamics = ApolloDynamics::new()?;
+        dynamics.reset_to_state(apollo_demo_initial_state());
         let env = ApolloControlEnv::new_attitude_control(dynamics, APOLLO_CONTROLLER_DT_SECS)?;
         let initial_snapshot = env.snapshot();
 
@@ -302,18 +321,28 @@ mod tests {
 
     #[test]
     fn reset_restores_control_clock() {
-        let dynamics = ApolloDynamics::new().expect("Apollo MuJoCo model should load");
+        let mut dynamics = ApolloDynamics::new().expect("Apollo MuJoCo model should load");
+        dynamics.reset_to_state(apollo_demo_initial_state());
         let mut env =
             ApolloControlEnv::new(dynamics, APOLLO_CONTROLLER_DT_SECS, ZeroWrenchController)
                 .expect("controller dt should align with simulation dt");
+
+        let initial = env.snapshot();
 
         env.step_control_tick();
         let reset = env.reset();
 
         assert_eq!(reset.control_tick, 0);
         assert!(approx_eq(reset.sim_time_secs, 0.0));
-        assert!(reset.state.position.is_finite());
-        assert!(reset.state.rotation.is_finite());
+        assert!(reset.state.position.distance(initial.state.position) < 1e-6);
+        assert!(reset.state.rotation.dot(initial.state.rotation).abs() > 1.0 - 1e-6);
+        assert!(
+            reset
+                .state
+                .angular_velocity
+                .distance(initial.state.angular_velocity)
+                < 1e-6
+        );
     }
 
     #[test]

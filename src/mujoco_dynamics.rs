@@ -11,9 +11,13 @@ pub struct ApolloWrench {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ApolloDynamicsState {
+    /// 世界系位置。
     pub position: Vec3,
+    /// 机体坐标系到世界坐标系的姿态旋转。
     pub rotation: Quat,
+    /// 世界系线速度。
     pub linear_velocity: Vec3,
+    /// 机体坐标系角速度。MuJoCo freejoint 的旋转 `qvel` 原生使用该表达。
     pub angular_velocity: Vec3,
 }
 
@@ -73,6 +77,34 @@ impl ApolloDynamics {
 
     pub fn reset(&mut self) {
         self.data.reset();
+        self.data.forward();
+    }
+
+    /// 重置到指定 freejoint 状态。
+    ///
+    /// MuJoCo 的 freejoint 将位置、姿态四元数和线速度存为世界系量，
+    /// 但将旋转 `qvel` 存为机体局部坐标系量。
+    pub fn reset_to_state(&mut self, state: ApolloDynamicsState) {
+        self.data.reset();
+
+        let rotation = state.rotation.normalize();
+        let qpos = self.data.qpos_mut();
+        qpos[0] = state.position.x as f64;
+        qpos[1] = state.position.y as f64;
+        qpos[2] = state.position.z as f64;
+        qpos[3] = rotation.w as f64;
+        qpos[4] = rotation.x as f64;
+        qpos[5] = rotation.y as f64;
+        qpos[6] = rotation.z as f64;
+
+        let qvel = self.data.qvel_mut();
+        qvel[0] = state.linear_velocity.x as f64;
+        qvel[1] = state.linear_velocity.y as f64;
+        qvel[2] = state.linear_velocity.z as f64;
+        qvel[3] = state.angular_velocity.x as f64;
+        qvel[4] = state.angular_velocity.y as f64;
+        qvel[5] = state.angular_velocity.z as f64;
+
         self.data.forward();
     }
 
@@ -142,6 +174,25 @@ mod tests {
 
         assert!(final_state.position.distance(initial.position) > 0.001);
         assert!(final_state.rotation.dot(initial.rotation).abs() < 0.99999);
+    }
+
+    #[test]
+    fn reset_to_state_preserves_freejoint_frame_conventions() {
+        let mut dynamics = ApolloDynamics::new().expect("Apollo MuJoCo model should load");
+        let expected = ApolloDynamicsState {
+            position: Vec3::new(1.0, -2.0, 0.5),
+            rotation: Quat::from_euler(glam::EulerRot::XYZ, -0.7, 0.4, 1.1),
+            linear_velocity: Vec3::new(-0.2, 0.3, 0.4),
+            angular_velocity: Vec3::new(0.6, -0.35, 0.15),
+        };
+
+        dynamics.reset_to_state(expected);
+        let actual = dynamics.state();
+
+        assert!(actual.position.distance(expected.position) < 1e-6);
+        assert!(actual.rotation.dot(expected.rotation).abs() > 1.0 - 1e-6);
+        assert!(actual.linear_velocity.distance(expected.linear_velocity) < 1e-6);
+        assert!(actual.angular_velocity.distance(expected.angular_velocity) < 1e-6);
     }
 
     /// 诊断测试：打印 MuJoCo 计算的质量、转动惯量和质心位置。

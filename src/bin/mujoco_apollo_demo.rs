@@ -74,7 +74,7 @@ fn setup(
 
     commands.spawn((
         Text::new(
-            "MuJoCo Apollo 6DoF | cascaded attitude control | outer quaternion kinematics + inner rate PID torque | R reset",
+            "MuJoCo Apollo single rigid body | non-aligned initial attitude + body rate | quaternion outer loop + PI-D rate torque | R reset",
         ),
         TextFont::from_font_size(16.0),
         TextColor(Color::srgb(0.92, 0.96, 1.0)),

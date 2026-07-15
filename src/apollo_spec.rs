@@ -88,6 +88,21 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
             scale: Vec3::new(1.18, 0.82, 1.0),
             physics_mass: Some(3270.0),
         },
+        // 视觉转接环同时嵌入下降级顶面和上升级底面，消除两级之间的悬空缝隙。
+        // 该零件不参与质量计算，因此不会因外形修复改变飞行动力学参数。
+        ApolloPart {
+            name: "interstage_adapter",
+            shape: ApolloShape::Cylinder {
+                radius: 1.5,
+                height: 0.24,
+                resolution: 16,
+            },
+            material: ApolloMaterial::Gold,
+            translation: Vec3::new(0.0, 2.345, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::new(1.0, 1.0, 0.92),
+            physics_mass: None,
+        },
         ApolloPart {
             name: "ascent_stage",
             shape: ApolloShape::Cylinder {
@@ -100,6 +115,20 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
             rotation: Quat::from_rotation_y(std::f32::consts::PI / 8.0),
             scale: Vec3::new(1.0, 0.8, 0.92),
             physics_mass: Some(3510.0),
+        },
+        // 对接舱口原本与上升级顶面之间存在可见空隙；用短转接颈桥接两者。
+        ApolloPart {
+            name: "docking_adapter",
+            shape: ApolloShape::Cylinder {
+                radius: 0.68,
+                height: 0.32,
+                resolution: 24,
+            },
+            material: ApolloMaterial::White,
+            translation: Vec3::new(0.0, 3.7, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+            physics_mass: None,
         },
         ApolloPart {
             name: "docking_hatch",
@@ -183,8 +212,9 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
         ApolloPart {
             name: "antenna_brace",
             shape: ApolloShape::Strut {
-                start: Vec3::new(-1.48, 3.44, -0.9),
-                end: Vec3::new(-2.24, 3.84, -1.48),
+                // 两端分别嵌入上升级壳体和碟形天线底座，避免近看时悬空。
+                start: Vec3::new(-1.3, 3.42, -0.72),
+                end: Vec3::new(-2.36, 3.94, -1.56),
                 radius: 0.036,
                 resolution: 8,
             },
@@ -202,7 +232,8 @@ pub fn apollo_parts() -> Vec<ApolloPart> {
                 resolution: 16,
             },
             material: ApolloMaterial::Metal,
-            translation: Vec3::new(1.44, 3.84, -0.7),
+            // 收回天线，使倾斜圆柱的下端落入上升级外壳内。
+            translation: Vec3::new(1.12, 3.84, -0.7),
             rotation: Quat::from_rotation_z(0.35),
             scale: Vec3::ONE,
             physics_mass: None,
@@ -413,6 +444,31 @@ fn mj_vec(v: Vec3) -> String {
 mod tests {
     use super::*;
 
+    fn part_named(name: &str) -> ApolloPart {
+        apollo_parts()
+            .into_iter()
+            .find(|part| part.name == name)
+            .unwrap_or_else(|| panic!("missing Apollo part: {name}"))
+    }
+
+    fn cylinder_vertical_bounds(part: ApolloPart) -> (f32, f32) {
+        let ApolloShape::Cylinder { height, .. } = part.shape else {
+            panic!("{} should be a cylinder", part.name);
+        };
+        let half_height = height * part.scale.y * 0.5;
+        (
+            part.translation.y - half_height,
+            part.translation.y + half_height,
+        )
+    }
+
+    fn cylinder_horizontal_radii(part: ApolloPart) -> Vec2 {
+        let ApolloShape::Cylinder { radius, .. } = part.shape else {
+            panic!("{} should be a cylinder", part.name);
+        };
+        Vec2::new(radius * part.scale.x, radius * part.scale.z)
+    }
+
     #[test]
     fn mjcf_contains_named_free_body() {
         let xml = apollo_mjcf_xml();
@@ -454,5 +510,89 @@ mod tests {
                 part.name
             );
         }
+    }
+
+    #[test]
+    fn adapters_bridge_the_main_stage_stack_without_affecting_mass() {
+        let descent_part = part_named("descent_stage");
+        let descent = cylinder_vertical_bounds(descent_part);
+        let interstage_part = part_named("interstage_adapter");
+        let interstage = cylinder_vertical_bounds(interstage_part);
+        let ascent_part = part_named("ascent_stage");
+        let ascent = cylinder_vertical_bounds(ascent_part);
+        let docking_adapter_part = part_named("docking_adapter");
+        let docking_adapter = cylinder_vertical_bounds(docking_adapter_part);
+        let docking_hatch_part = part_named("docking_hatch");
+        let docking_hatch = cylinder_vertical_bounds(docking_hatch_part);
+
+        assert!(interstage.0 < descent.1 && interstage.1 > ascent.0);
+        assert!(docking_adapter.0 < ascent.1 && docking_adapter.1 > docking_hatch.0);
+
+        let descent_radii = cylinder_horizontal_radii(descent_part);
+        let interstage_radii = cylinder_horizontal_radii(interstage_part);
+        let ascent_radii = cylinder_horizontal_radii(ascent_part);
+        let docking_adapter_radii = cylinder_horizontal_radii(docking_adapter_part);
+        let docking_hatch_radii = cylinder_horizontal_radii(docking_hatch_part);
+        assert!(interstage_radii.cmpgt(Vec2::ZERO).all());
+        assert!(interstage_radii.cmple(descent_radii).all());
+        assert!(interstage_radii.cmple(ascent_radii).all());
+        assert!(docking_adapter_radii.cmpgt(Vec2::ZERO).all());
+        assert!(docking_adapter_radii.cmple(ascent_radii).all());
+        assert!(docking_adapter_radii.cmple(docking_hatch_radii).all());
+
+        assert!(interstage_part.physics_mass.is_none());
+        assert!(docking_adapter_part.physics_mass.is_none());
+        assert_eq!(total_physics_mass(), 7326.0);
+
+        let xml = apollo_mjcf_xml();
+        assert!(!xml.contains("interstage_adapter"));
+        assert!(!xml.contains("docking_adapter"));
+    }
+
+    #[test]
+    fn upper_antennas_are_anchored_to_the_lander() {
+        let ascent = part_named("ascent_stage");
+        let ApolloShape::Cylinder { radius, height, .. } = ascent.shape else {
+            panic!("ascent_stage should be a cylinder");
+        };
+        let ascent_bottom = ascent.translation.y - height * ascent.scale.y * 0.5;
+        let ascent_top = ascent.translation.y + height * ascent.scale.y * 0.5;
+
+        let side_antenna = part_named("side_antenna");
+        let ApolloShape::Cylinder { height, .. } = side_antenna.shape else {
+            panic!("side_antenna should be a cylinder");
+        };
+        let antenna_axis = side_antenna.rotation * Vec3::Y;
+        let antenna_bottom =
+            side_antenna.translation - antenna_axis * height * side_antenna.scale.y * 0.5;
+        let normalized_radius = Vec2::new(
+            antenna_bottom.x / (radius * ascent.scale.x),
+            antenna_bottom.z / (radius * ascent.scale.z),
+        )
+        .length();
+        assert!(normalized_radius < 1.0);
+        assert!((ascent_bottom..=ascent_top).contains(&antenna_bottom.y));
+
+        let brace = part_named("antenna_brace");
+        let ApolloShape::Strut { start, end, .. } = brace.shape else {
+            panic!("antenna_brace should be a strut");
+        };
+        let brace_start_radius = Vec2::new(
+            start.x / (radius * ascent.scale.x),
+            start.z / (radius * ascent.scale.z),
+        )
+        .length();
+        assert!(brace_start_radius < 1.0);
+        assert!((ascent_bottom..=ascent_top).contains(&start.y));
+
+        let dish_mount = part_named("dish_mount");
+        assert_eq!(end, dish_mount.translation);
+        let (_, dish_mount_top) = cylinder_vertical_bounds(dish_mount);
+        let dish = part_named("dish");
+        let ApolloShape::Sphere { radius } = dish.shape else {
+            panic!("dish should be a sphere");
+        };
+        let dish_bottom = dish.translation.y - radius * dish.scale.y;
+        assert!(dish_mount_top > dish_bottom);
     }
 }
