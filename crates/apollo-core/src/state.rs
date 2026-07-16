@@ -94,7 +94,7 @@ impl BodyWrench {
 }
 
 /// 固定持久格式中的四元数顺序，避免 `glam` 的 xyzw serde 细节泄漏到 API。
-mod dquat_wxyz {
+pub(crate) mod dquat_wxyz {
     use glam::DQuat;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

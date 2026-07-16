@@ -83,6 +83,44 @@ def test_writer_emits_rust_v1_header_and_explicit_wxyz_frame() -> None:
     ]
 
 
+def test_writer_records_optional_desired_attitude_for_replay() -> None:
+    desired = np.array([0.5, 0.5, 0.5, 0.5])
+    stream = io.StringIO()
+    writer = JsonlTrajectoryWriter(
+        stream,
+        initial_snapshot(),
+        SimulationTiming(),
+        initial_desired_attitude_wxyz=desired,
+    )
+    writer.write_step(sample_step(), desired_attitude_wxyz=desired)
+
+    header_line, frame_line = stream.getvalue().splitlines()
+    header = json.loads(header_line)
+    frame = json.loads(frame_line)
+    expected = {"quaternion_desired_body_to_world_wxyz": desired.tolist()}
+    assert header["initial_attitude_reference"] == expected
+    assert frame["attitude_reference"] == expected
+
+
+def test_writer_rejects_invalid_desired_attitude() -> None:
+    with pytest.raises(ValueError, match="unit quaternion"):
+        JsonlTrajectoryWriter(
+            io.StringIO(),
+            initial_snapshot(),
+            SimulationTiming(),
+            initial_desired_attitude_wxyz=[2.0, 0.0, 0.0, 0.0],
+        )
+
+    writer = JsonlTrajectoryWriter(
+        io.StringIO(), initial_snapshot(), SimulationTiming()
+    )
+    with pytest.raises(ValueError, match="finite"):
+        writer.write_step(
+            sample_step(),
+            desired_attitude_wxyz=[np.nan, 0.0, 0.0, 0.0],
+        )
+
+
 def test_writer_rejects_non_aligned_or_non_monotonic_ticks() -> None:
     stream = io.StringIO()
     writer = JsonlTrajectoryWriter(stream, initial_snapshot(), SimulationTiming())

@@ -2,6 +2,7 @@ use apollo_core::{
     ApolloState, BodyWrench, TelemetryFrame, TelemetryFrameError, TrajectoryHeader,
     TrajectoryHeaderError,
 };
+use glam::DQuat;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -40,6 +41,8 @@ pub struct Trajectory {
 #[derive(Clone, Copy, Debug)]
 pub struct SampledFrame {
     pub state: ApolloState,
+    /// 调用方记录了该时刻的期望姿态时，返回从期望机体系到世界系的旋转。
+    pub desired_body_to_world: Option<DQuat>,
     /// 能从记录帧确定时，采样区间使用的请求动作。
     ///
     /// 稀疏轨迹的帧间动作不可恢复，此时为 `None`，viewer 不会伪造 wrench。
@@ -110,6 +113,15 @@ impl Trajectory {
         &self.frames
     }
 
+    /// 是否至少记录了一个期望姿态样本。
+    pub fn has_attitude_reference(&self) -> bool {
+        self.header.initial_attitude_reference.is_some()
+            || self
+                .frames
+                .iter()
+                .any(|frame| frame.attitude_reference.is_some())
+    }
+
     pub fn start_time_seconds(&self) -> f64 {
         self.header
             .initial_snapshot
@@ -131,6 +143,10 @@ impl Trajectory {
         if self.frames.is_empty() {
             return SampledFrame {
                 state: self.header.initial_snapshot.state,
+                desired_body_to_world: self
+                    .header
+                    .initial_attitude_reference
+                    .map(|reference| reference.desired_body_to_world),
                 requested_action: None,
                 applied_action: None,
                 sim_time_seconds: self.start_time_seconds(),
@@ -159,6 +175,11 @@ impl Trajectory {
             self.frames[upper - 1].snapshot
         };
         let after = self.frames[upper];
+        let before_reference = if upper == 0 {
+            self.header.initial_attitude_reference
+        } else {
+            self.frames[upper - 1].attitude_reference
+        };
         let before_time = before.sim_time_seconds(self.header.timing);
         let after_time = self.frame_time_seconds(&after);
         let alpha = if after_time > before_time {
@@ -182,6 +203,13 @@ impl Trajectory {
 
         SampledFrame {
             state: interpolate_state(before.state, after.snapshot.state, alpha),
+            desired_body_to_world: interpolate_optional_attitude(
+                before_reference.map(|reference| reference.desired_body_to_world),
+                after
+                    .attitude_reference
+                    .map(|reference| reference.desired_body_to_world),
+                alpha,
+            ),
             requested_action: action_is_known.then_some(after.requested_action),
             applied_action: action_is_known.then_some(after.applied_action),
             sim_time_seconds: clamped,
@@ -195,11 +223,32 @@ impl Trajectory {
     fn sample_from_frame(&self, frame: TelemetryFrame) -> SampledFrame {
         SampledFrame {
             state: frame.snapshot.state,
+            desired_body_to_world: frame
+                .attitude_reference
+                .map(|reference| reference.desired_body_to_world),
             requested_action: Some(frame.requested_action),
             applied_action: Some(frame.applied_action),
             sim_time_seconds: frame.snapshot.sim_time_seconds(self.header.timing),
         }
     }
+}
+
+fn interpolate_optional_attitude(
+    before: Option<DQuat>,
+    after: Option<DQuat>,
+    alpha: f64,
+) -> Option<DQuat> {
+    if alpha <= f64::EPSILON {
+        return before;
+    }
+    if alpha >= 1.0 - f64::EPSILON {
+        return after;
+    }
+    let (before, mut after) = (before?, after?);
+    if before.dot(after) < 0.0 {
+        after = -after;
+    }
+    Some(before.slerp(after, alpha).normalize())
 }
 
 fn interpolate_state(before: ApolloState, after: ApolloState, alpha: f64) -> ApolloState {
@@ -244,7 +293,8 @@ mod tests {
                 position_body_origin_world_m: DVec3::new(-2.0, 0.0, 0.0),
                 ..ApolloState::ZERO
             }),
-        );
+        )
+        .with_initial_desired_attitude(DQuat::IDENTITY);
         let first = TelemetryFrame {
             snapshot: PlantSnapshot {
                 state: ApolloState::ZERO,
@@ -253,7 +303,9 @@ mod tests {
             },
             requested_action: BodyWrench::ZERO,
             applied_action: BodyWrench::ZERO,
-        };
+            attitude_reference: None,
+        }
+        .with_desired_attitude(DQuat::from_rotation_z(0.5));
         let second = TelemetryFrame {
             snapshot: PlantSnapshot {
                 state: ApolloState {
@@ -269,7 +321,9 @@ mod tests {
                 torque_about_com_body_nm: DVec3::Y,
             },
             applied_action: BodyWrench::ZERO,
-        };
+            attitude_reference: None,
+        }
+        .with_desired_attitude(DQuat::from_rotation_z(1.0));
         format!(
             "{}\n{}\n{}\n",
             serde_json::to_string(&header).unwrap(),
@@ -293,6 +347,10 @@ mod tests {
         assert!((sample.state.position_body_origin_world_m.x - 1.0).abs() < 1.0e-12);
         assert_eq!(sample.requested_action.unwrap().force_body_n.x, 1.0);
         assert!(sample.state.body_to_world.is_normalized());
+        let desired = sample.desired_body_to_world.unwrap();
+        let expected = DQuat::from_rotation_z(0.75);
+        assert!(desired.abs_diff_eq(expected, 1.0e-12));
+        assert!(trajectory.has_attitude_reference());
     }
 
     #[test]
@@ -313,6 +371,7 @@ mod tests {
         let sample = trajectory.sample(10.0);
         assert_eq!(sample.state, initial_state);
         assert!(sample.applied_action.is_none());
+        assert!(sample.desired_body_to_world.is_none());
         assert_eq!(sample.sim_time_seconds, 0.0);
     }
 
@@ -334,6 +393,7 @@ mod tests {
                 torque_about_com_body_nm: DVec3::ZERO,
             },
             applied_action: BodyWrench::ZERO,
+            attitude_reference: None,
         };
         let jsonl = format!(
             "{}\n{}\n",

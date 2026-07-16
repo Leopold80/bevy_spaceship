@@ -238,6 +238,56 @@ class SimulationTiming:
         return self.control_step_ns * 1.0e-9
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class ApolloModelSpec:
+    """调用方控制律可读取的 Apollo 刚体质量属性。"""
+
+    name: str
+    mass_kg: float
+    center_of_mass_body_m: FloatVector
+    diagonal_inertia_body_kg_m2: FloatVector
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("name must be a non-empty string")
+        mass_kg = float(self.mass_kg)
+        if not np.isfinite(mass_kg) or mass_kg <= 0.0:
+            raise ValueError("mass_kg must be finite and positive")
+
+        center_of_mass = _readonly_vector(
+            "center_of_mass_body_m", self.center_of_mass_body_m, 3
+        )
+        inertia = _readonly_vector(
+            "diagonal_inertia_body_kg_m2",
+            self.diagonal_inertia_body_kg_m2,
+            3,
+        )
+        if np.any(inertia <= 0.0):
+            raise ValueError("diagonal_inertia_body_kg_m2 must be positive")
+
+        object.__setattr__(self, "mass_kg", mass_kg)
+        object.__setattr__(self, "center_of_mass_body_m", center_of_mass)
+        object.__setattr__(self, "diagonal_inertia_body_kg_m2", inertia)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, ApolloModelSpec)
+            and self.name == other.name
+            and self.mass_kg == other.mass_kg
+            and bool(
+                np.array_equal(
+                    self.center_of_mass_body_m, other.center_of_mass_body_m
+                )
+            )
+            and bool(
+                np.array_equal(
+                    self.diagonal_inertia_body_kg_m2,
+                    other.diagonal_inertia_body_kg_m2,
+                )
+            )
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class PlantSnapshot:
     state: ApolloState
@@ -320,6 +370,27 @@ def _validated_step_copy(step: PlantStep) -> PlantStep:
     )
 
 
+def _validated_attitude_reference(value: ArrayLike | None) -> FloatVector | None:
+    if value is None:
+        return None
+    quaternion = _readonly_vector(
+        "quaternion_desired_body_to_world_wxyz", value, 4
+    )
+    norm = float(np.linalg.norm(quaternion))
+    if abs(norm - 1.0) > _QUATERNION_NORM_TOLERANCE:
+        raise ValueError(
+            "quaternion_desired_body_to_world_wxyz must be a unit quaternion "
+            f"(norm={norm:.16g})"
+        )
+    return quaternion
+
+
+def _attitude_reference_to_json(quaternion_wxyz: FloatVector) -> dict[str, object]:
+    return {
+        "quaternion_desired_body_to_world_wxyz": quaternion_wxyz.tolist()
+    }
+
+
 class JsonlTrajectoryWriter:
     """与 Rust v1 schema 一致、由调用方显式驱动的 JSONL 记录器。"""
 
@@ -330,6 +401,7 @@ class JsonlTrajectoryWriter:
         stream: TextIO,
         initial_snapshot: PlantSnapshot,
         timing: SimulationTiming,
+        initial_desired_attitude_wxyz: ArrayLike | None = None,
     ) -> None:
         if not hasattr(stream, "write"):
             raise ValueError("stream must be a text stream with write()")
@@ -344,34 +416,46 @@ class JsonlTrajectoryWriter:
         if not isinstance(timing, SimulationTiming):
             raise ValueError("timing must be a SimulationTiming")
         selected_timing = timing
+        initial_reference = _validated_attitude_reference(
+            initial_desired_attitude_wxyz
+        )
 
         self._stream = stream
         self._timing = selected_timing
         self._last_control_tick: int | None = validated_initial.control_tick
-        self._write_json_line(
-            {
-                "format": "apollo-telemetry-jsonl",
-                "version": 1,
-                "model": "apollo_lander",
-                "timing": {
-                    "physics_step_ns": selected_timing.physics_step_ns,
-                    "substeps_per_control": selected_timing.substeps_per_control,
-                },
-                "initial_snapshot": _snapshot_to_json(validated_initial),
-            }
-        )
+        header: dict[str, object] = {
+            "format": "apollo-telemetry-jsonl",
+            "version": 1,
+            "model": "apollo_lander",
+            "timing": {
+                "physics_step_ns": selected_timing.physics_step_ns,
+                "substeps_per_control": selected_timing.substeps_per_control,
+            },
+            "initial_snapshot": _snapshot_to_json(validated_initial),
+        }
+        if initial_reference is not None:
+            header["initial_attitude_reference"] = _attitude_reference_to_json(
+                initial_reference
+            )
+        self._write_json_line(header)
 
     @property
     def timing(self) -> SimulationTiming:
         return self._timing
 
-    def write_step(self, step: PlantStep) -> None:
+    def write_step(
+        self,
+        step: PlantStep,
+        *,
+        desired_attitude_wxyz: ArrayLike | None = None,
+    ) -> None:
         """写一个调用方明确选择的 step；本对象不持有或驱动 plant。"""
 
         if not isinstance(step, PlantStep):
             raise ValueError("step must be a PlantStep")
 
         validated_step = _validated_step_copy(step)
+        attitude_reference = _validated_attitude_reference(desired_attitude_wxyz)
         snapshot = validated_step.snapshot
         if snapshot.control_tick > (
             np.iinfo(np.uint64).max // self._timing.substeps_per_control
@@ -396,7 +480,12 @@ class JsonlTrajectoryWriter:
                 f"(previous: {self._last_control_tick}, current: {snapshot.control_tick})"
             )
 
-        self._write_json_line(_step_to_json(validated_step))
+        frame = _step_to_json(validated_step)
+        if attitude_reference is not None:
+            frame["attitude_reference"] = _attitude_reference_to_json(
+                attitude_reference
+            )
+        self._write_json_line(frame)
         self._last_control_tick = snapshot.control_tick
 
     def _write_json_line(self, value: object) -> None:
@@ -468,7 +557,7 @@ def _snapshot_from_native(raw: tuple[Sequence[float], int, int]) -> PlantSnapsho
 class ApolloPlantFactory:
     """编译并共享只读 MuJoCo 模型，用于创建相互独立的 plant。"""
 
-    __slots__ = ("_native_factory", "_timing")
+    __slots__ = ("_model_spec", "_native_factory", "_timing")
 
     def __init__(self, timing: SimulationTiming | None = None) -> None:
         selected_timing = timing if timing is not None else SimulationTiming()
@@ -480,11 +569,24 @@ class ApolloPlantFactory:
             selected_timing.physics_step_seconds,
             selected_timing.substeps_per_control,
         )
+        name, mass_kg, center_of_mass, diagonal_inertia = (
+            self._native_factory.model_spec()
+        )
+        self._model_spec = ApolloModelSpec(
+            name=name,
+            mass_kg=mass_kg,
+            center_of_mass_body_m=center_of_mass,
+            diagonal_inertia_body_kg_m2=diagonal_inertia,
+        )
         self._timing = selected_timing
 
     @property
     def timing(self) -> SimulationTiming:
         return self._timing
+
+    @property
+    def model_spec(self) -> ApolloModelSpec:
+        return self._model_spec
 
     def spawn(self, initial_state: ApolloState) -> ApolloPlant:
         if not isinstance(initial_state, ApolloState):

@@ -6,7 +6,9 @@
 use apollo_mujoco::{ApolloPlantFactory, ApolloState, BodyWrench, PlantSnapshot};
 use apollo_viewer::model::{create_lander_materials, dquat, dvec3, spawn_lander};
 use apollo_viewer::scene::{
-    create_star_material, default_window, insert_default_lighting, spawn_camera_and_light,
+    create_reference_frame_materials, create_star_material, default_window,
+    insert_default_lighting, spawn_attitude_frame_legend, spawn_camera_and_light,
+    spawn_current_attitude_frame, spawn_desired_attitude_axis_labels, spawn_desired_attitude_frame,
     spawn_stars,
 };
 use bevy::prelude::*;
@@ -18,6 +20,9 @@ use std::time::{Duration, Instant};
 
 #[derive(Component)]
 struct ApolloVisualRoot;
+
+#[derive(Component)]
+struct BodyFrameRoot;
 
 #[derive(Component)]
 struct StatusText;
@@ -140,9 +145,13 @@ fn challenge_initial_state() -> ApolloState {
     }
 }
 
+fn desired_attitude() -> DQuat {
+    DQuat::IDENTITY
+}
+
 /// 例程私有的单位姿态 PD；它不是 `apollo-mujoco` 的一部分。
 fn attitude_pd(state: ApolloState) -> BodyWrench {
-    let mut error_body = state.body_to_world.conjugate();
+    let mut error_body = desired_attitude() * state.body_to_world.conjugate();
     if error_body.w < 0.0 {
         error_body = -error_body;
     }
@@ -176,11 +185,34 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    live: Res<LiveExampleState>,
 ) {
     spawn_camera_and_light(&mut commands);
     let lander_materials = create_lander_materials(&mut materials);
     let star = create_star_material(&mut materials);
+    let frame_materials = create_reference_frame_materials(&mut materials);
     spawn_stars(&mut commands, &mut meshes, star);
+    spawn_attitude_frame_legend(&mut commands, true);
+    spawn_desired_attitude_frame(
+        &mut commands,
+        &mut meshes,
+        &frame_materials,
+        dquat(desired_attitude()),
+        Visibility::Inherited,
+    );
+    spawn_desired_attitude_axis_labels(
+        &mut commands,
+        dquat(desired_attitude()),
+        Visibility::Inherited,
+    );
+    let initial_snapshot = *live.latest.lock().expect("latest snapshot mutex poisoned");
+    let body_frame = spawn_current_attitude_frame(
+        &mut commands,
+        &mut meshes,
+        &frame_materials,
+        dquat(initial_snapshot.state.body_to_world),
+    );
+    commands.entity(body_frame).insert(BodyFrameRoot);
     let lander = spawn_lander(
         &mut commands,
         &mut meshes,
@@ -196,7 +228,9 @@ fn setup(
         Node {
             position_type: PositionType::Absolute,
             left: px(18.0),
+            right: px(18.0),
             top: px(12.0),
+            max_width: px(1240.0),
             ..default()
         },
         StatusText,
@@ -222,7 +256,8 @@ fn handle_input(keyboard: Res<ButtonInput<KeyCode>>, live: Res<LiveExampleState>
 
 fn sync_visual(
     live: Res<LiveExampleState>,
-    mut lander: Query<&mut Transform, With<ApolloVisualRoot>>,
+    mut lander: Query<&mut Transform, (With<ApolloVisualRoot>, Without<BodyFrameRoot>)>,
+    mut body_frame: Query<&mut Transform, (With<BodyFrameRoot>, Without<ApolloVisualRoot>)>,
 ) {
     let Ok(mut transform) = lander.single_mut() else {
         return;
@@ -230,6 +265,9 @@ fn sync_visual(
     let snapshot = *live.latest.lock().expect("latest snapshot mutex poisoned");
     transform.translation = dvec3(snapshot.state.position_body_origin_world_m);
     transform.rotation = dquat(snapshot.state.body_to_world);
+    if let Ok(mut frame_transform) = body_frame.single_mut() {
+        frame_transform.rotation = transform.rotation;
+    }
 }
 
 fn update_status(live: Res<LiveExampleState>, mut text: Query<&mut Text, With<StatusText>>) {

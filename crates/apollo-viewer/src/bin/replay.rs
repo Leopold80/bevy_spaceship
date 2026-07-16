@@ -1,15 +1,28 @@
 use apollo_viewer::model::{create_lander_materials, dquat, dvec3, spawn_lander};
 use apollo_viewer::scene::{
-    create_star_material, default_window, insert_default_lighting, spawn_camera_and_light,
-    spawn_stars,
+    create_reference_frame_materials, create_star_material, default_window,
+    desired_attitude_axis_label_position, insert_default_lighting, spawn_attitude_frame_legend,
+    spawn_camera_and_light, spawn_current_attitude_frame, spawn_desired_attitude_axis_labels,
+    spawn_desired_attitude_frame, spawn_stars,
 };
-use apollo_viewer::trajectory::Trajectory;
+use apollo_viewer::trajectory::{SampledFrame, Trajectory};
 use bevy::prelude::*;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Component)]
 struct ApolloVisualRoot;
+
+#[derive(Component)]
+struct BodyFrameRoot;
+
+#[derive(Component)]
+struct DesiredFrameRoot;
+
+#[derive(Component)]
+struct DesiredAxisLabel {
+    local_axis: Vec3,
+}
 
 #[derive(Component)]
 struct StatusText;
@@ -57,7 +70,16 @@ fn main() {
     app.add_systems(Startup, setup)
         .add_systems(
             Update,
-            (handle_input, advance_replay, sync_visual, update_status).chain(),
+            (
+                handle_input,
+                advance_replay,
+                sync_visual,
+                sync_current_attitude_frame,
+                sync_desired_attitude_frame,
+                sync_desired_axis_labels,
+                update_status,
+            )
+                .chain(),
         )
         .run();
 }
@@ -99,11 +121,48 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    replay: Res<ReplayState>,
 ) {
     spawn_camera_and_light(&mut commands);
     let lander_materials = create_lander_materials(&mut materials);
     let star = create_star_material(&mut materials);
+    let frame_materials = create_reference_frame_materials(&mut materials);
     spawn_stars(&mut commands, &mut meshes, star);
+    let initial_sample = replay.trajectory.sample(replay.time_seconds);
+    spawn_attitude_frame_legend(&mut commands, replay.trajectory.has_attitude_reference());
+    let desired_rotation = initial_sample
+        .desired_body_to_world
+        .map(dquat)
+        .unwrap_or(Quat::IDENTITY);
+    let desired_visibility = if initial_sample.desired_body_to_world.is_some() {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    let desired_frame = spawn_desired_attitude_frame(
+        &mut commands,
+        &mut meshes,
+        &frame_materials,
+        desired_rotation,
+        desired_visibility,
+    );
+    commands.entity(desired_frame).insert(DesiredFrameRoot);
+    for (label, local_axis) in
+        spawn_desired_attitude_axis_labels(&mut commands, desired_rotation, desired_visibility)
+            .into_iter()
+            .zip([Vec3::X, Vec3::Y, Vec3::Z])
+    {
+        commands
+            .entity(label)
+            .insert(DesiredAxisLabel { local_axis });
+    }
+    let body_frame = spawn_current_attitude_frame(
+        &mut commands,
+        &mut meshes,
+        &frame_materials,
+        dquat(initial_sample.state.body_to_world),
+    );
+    commands.entity(body_frame).insert(BodyFrameRoot);
     let lander = spawn_lander(
         &mut commands,
         &mut meshes,
@@ -119,7 +178,9 @@ fn setup(
         Node {
             position_type: PositionType::Absolute,
             left: px(18.0),
+            right: px(18.0),
             top: px(12.0),
+            max_width: px(1240.0),
             ..default()
         },
         StatusText,
@@ -208,27 +269,88 @@ fn sync_visual(
     transform.rotation = dquat(sample.state.body_to_world);
 }
 
+fn sync_current_attitude_frame(
+    replay: Res<ReplayState>,
+    mut body_frame: Query<&mut Transform, With<BodyFrameRoot>>,
+) {
+    let Ok(mut frame_transform) = body_frame.single_mut() else {
+        return;
+    };
+    let sample = replay.trajectory.sample(replay.time_seconds);
+    frame_transform.rotation = dquat(sample.state.body_to_world);
+}
+
+fn sync_desired_attitude_frame(
+    replay: Res<ReplayState>,
+    mut desired_frame: Query<(&mut Transform, &mut Visibility), With<DesiredFrameRoot>>,
+) {
+    let sample = replay.trajectory.sample(replay.time_seconds);
+    if let Ok((mut frame_transform, mut visibility)) = desired_frame.single_mut() {
+        if let Some(desired_body_to_world) = sample.desired_body_to_world {
+            frame_transform.rotation = dquat(desired_body_to_world);
+            *visibility = Visibility::Inherited;
+        } else {
+            *visibility = Visibility::Hidden;
+        }
+    }
+}
+
+fn sync_desired_axis_labels(
+    replay: Res<ReplayState>,
+    mut labels: Query<(&DesiredAxisLabel, &mut Transform, &mut Visibility)>,
+) {
+    let sample = replay.trajectory.sample(replay.time_seconds);
+    for (label, mut transform, mut visibility) in &mut labels {
+        if let Some(desired_body_to_world) = sample.desired_body_to_world {
+            transform.translation = desired_attitude_axis_label_position(
+                dquat(desired_body_to_world),
+                label.local_axis,
+            );
+            *visibility = Visibility::Inherited;
+        } else {
+            *visibility = Visibility::Hidden;
+        }
+    }
+}
+
 fn update_status(replay: Res<ReplayState>, mut text: Query<&mut Text, With<StatusText>>) {
     let Ok(mut text) = text.single_mut() else {
         return;
     };
     let sample = replay.trajectory.sample(replay.time_seconds);
     let status = if replay.playing { "PLAYING" } else { "PAUSED" };
+    *text = Text::new(status_text(
+        status,
+        &sample,
+        replay.trajectory.end_time_seconds(),
+        replay.playback_rate,
+    ));
+}
+
+fn status_text(
+    status: &str,
+    sample: &SampledFrame,
+    end_time_seconds: f64,
+    playback_rate: f64,
+) -> String {
     let wrench_status = match sample.applied_action {
         Some(action) => format!(
-            "|F| {:.1} N | |τ| {:.1} N·m",
+            "|force_body| {:.1} N | |torque_body| {:.1} N*m",
             action.force_body_n.length(),
             action.torque_about_com_body_nm.length(),
         ),
-        None => "|F| unknown | |τ| unknown".to_owned(),
+        None => "|force_body| unknown | |torque_body| unknown".to_owned(),
     };
-    *text = Text::new(format!(
-        "{status} | t {time:.3} / {end:.3} s | speed {rate:.3}x | |ω| {omega:.4} rad/s | {wrench_status}\nSpace play/pause | R restart | ←/→ single control tick | ↑/↓ speed",
+    let reference_status = if sample.desired_body_to_world.is_some() {
+        "desired attitude recorded"
+    } else {
+        "desired attitude unavailable"
+    };
+    format!(
+        "{status} | t {time:.3} / {end_time_seconds:.3} s | speed {playback_rate:.3}x | |omega_body| {omega:.4} rad/s | {wrench_status}\n{reference_status} | Space play/pause | R restart | Left/Right single control tick | Up/Down speed",
         time = sample.sim_time_seconds,
-        end = replay.trajectory.end_time_seconds(),
-        rate = replay.playback_rate,
         omega = sample.state.angular_velocity_body_radps.length(),
-    ));
+    )
 }
 
 #[cfg(test)]
@@ -267,5 +389,17 @@ mod tests {
             stepped_control_time(timing, tick_three, 10, false),
             tick_two
         );
+    }
+
+    #[test]
+    fn status_overlay_uses_only_default_font_ascii_glyphs() {
+        let sample = SampledFrame {
+            state: apollo_core::ApolloState::ZERO,
+            desired_body_to_world: Some(glam::DQuat::IDENTITY),
+            requested_action: Some(apollo_core::BodyWrench::ZERO),
+            applied_action: Some(apollo_core::BodyWrench::ZERO),
+            sim_time_seconds: 1.25,
+        };
+        assert!(status_text("PAUSED", &sample, 30.0, 1.0).is_ascii());
     }
 }

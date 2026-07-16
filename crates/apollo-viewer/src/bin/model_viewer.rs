@@ -1,7 +1,8 @@
 use apollo_viewer::model::{create_lander_materials, spawn_lander};
 use apollo_viewer::scene::{
-    create_star_material, default_window, insert_default_lighting, spawn_camera_and_light,
-    spawn_stars,
+    create_reference_frame_materials, create_star_material, default_window,
+    insert_default_lighting, spawn_attitude_frame_legend, spawn_camera_and_light,
+    spawn_current_attitude_frame, spawn_stars,
 };
 use bevy::prelude::*;
 
@@ -20,7 +21,10 @@ fn setup(
     spawn_camera_and_light(&mut commands);
     let lander_materials = create_lander_materials(&mut materials);
     let star = create_star_material(&mut materials);
+    let frame_materials = create_reference_frame_materials(&mut materials);
     spawn_stars(&mut commands, &mut meshes, star);
+    spawn_attitude_frame_legend(&mut commands, false);
+    spawn_current_attitude_frame(&mut commands, &mut meshes, &frame_materials, Quat::IDENTITY);
     spawn_lander(
         &mut commands,
         &mut meshes,

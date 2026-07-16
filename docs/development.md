@@ -52,7 +52,7 @@ python -m pip install maturin pytest
 ```bash
 conda activate cybernetic_env
 source scripts/mujoco_env.zsh
-python python/examples/closed_loop_attitude.py
+python examples/python/closed_loop_attitude.py
 ```
 
 不要用 `source ... && conda run ...` 代替。macOS 上 `conda run` 会过滤子进程的 `DYLD_LIBRARY_PATH`，导致已经构建的扩展仍找不到仓库内的 MuJoCo framework。

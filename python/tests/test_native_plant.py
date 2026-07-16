@@ -2,7 +2,13 @@ import numpy as np
 import pytest
 
 import apollo_sim._api as api
-from apollo_sim import ApolloPlantFactory, ApolloState, BodyWrench, SimulationTiming
+from apollo_sim import (
+    ApolloModelSpec,
+    ApolloPlantFactory,
+    ApolloState,
+    BodyWrench,
+    SimulationTiming,
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -63,6 +69,24 @@ def test_python_and_native_timing_use_the_same_integer_nanoseconds() -> None:
     assert timing.physics_step_ns == 2_000_000
     assert plant._native_plant.timing() == (0.002, 10)
     assert plant.step(BodyWrench.zero()).snapshot.sim_time_seconds(timing) == 0.02
+
+
+def test_factory_exposes_readonly_touchdown_model_spec() -> None:
+    spec = ApolloPlantFactory().model_spec
+
+    assert isinstance(spec, ApolloModelSpec)
+    assert spec.name == "apollo_lander"
+    assert spec.mass_kg == pytest.approx(4_932.0)
+    np.testing.assert_allclose(
+        spec.center_of_mass_body_m,
+        [0.0, 2.012912912912913, 0.0],
+        atol=1.0e-15,
+    )
+    np.testing.assert_allclose(
+        spec.diagonal_inertia_body_kg_m2, [6_332.0, 7_953.0, 5_879.0]
+    )
+    assert not spec.center_of_mass_body_m.flags.writeable
+    assert not spec.diagonal_inertia_body_kg_m2.flags.writeable
 
 
 def test_reset_replay_is_deterministic() -> None:

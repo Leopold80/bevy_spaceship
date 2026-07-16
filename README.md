@@ -63,7 +63,9 @@ fn main() -> Result<(), PlantError> {
 
 每次 `step()` 恰好推进一个控制周期。默认时间基准为 2 ms 物理步长、每个动作保持 10 个物理小步，即 20 ms 控制周期。
 
-仓库内的手写闭环例程会生成 `runs/closed_loop_attitude.jsonl`：
+仓库内的手写闭环例程源码位于
+[`examples/rust/closed_loop_attitude.rs`](examples/rust/closed_loop_attitude.rs)，会生成
+`runs/closed_loop_attitude.jsonl`：
 
 ```bash
 source scripts/mujoco_env.zsh
@@ -115,10 +117,12 @@ for _ in range(500):
 
 Python 领域对象是 frozen dataclass，向量数组以 `numpy.float64` 保存并默认设为只读；这是防止误改的 API 约定，不是不可绕过的安全边界。
 
-完整 Python 闭环例程会生成 `runs/python_closed_loop_attitude.jsonl`：
+完整 Python 闭环例程位于
+[`examples/python/closed_loop_attitude.py`](examples/python/closed_loop_attitude.py)，会生成
+`runs/python_closed_loop_attitude.jsonl`：
 
 ```bash
-python python/examples/closed_loop_attitude.py
+python examples/python/closed_loop_attitude.py
 ```
 
 ## 可视化
@@ -136,7 +140,15 @@ cargo run -p apollo-viewer --bin apollo-replay -- runs/closed_loop_attitude.json
 cargo run -p apollo-viewer --bin apollo-replay -- runs/python_closed_loop_attitude.jsonl
 ```
 
+两个例程都在调用方组合姿态控制与一个限幅的质心位置/速度 PD 定点环。初态还会按
+`v_origin = -omega_world x r_com_world` 设置机体系原点速度，使非零初始角速度对应
+零质心速度；否则零重力下的质心会带着初始平动速度一直飞出画面。这些控制律仍然
+只是例程代码，不属于 plant。Rust 可从 `factory.model_spec()`、Python 可从
+`factory.model_spec` 读取质量、质心偏置和惯量，无需在外部算法中复制模型常数。
+
 按键：`Space` 播放/暂停，`R` 回到开头，左右方向键按控制 tick 单步，上下方向键调整速度。轨迹 header 保存 reset 后的 tick 0 初始快照，因此回放从 `t=0` 开始。若调用方只稀疏记录帧，未记录控制区间的 action 无法恢复，viewer 会显示 `unknown`，不会伪造 wrench。
+
+画面右侧的姿态坐标系使用粗实线表示调用方记录的期望姿态、细半透明线表示当前姿态。Rust/Python 记录器都允许把期望姿态作为可选遥测附加到 header 和逐 tick 帧中；旧轨迹或未提供目标的调用方不会显示粗实线，viewer 也不会拿世界系冒充目标。状态栏只使用 Bevy 默认字体可靠覆盖的 ASCII 字形。
 
 只做无窗口格式与契约校验：
 
@@ -171,7 +183,7 @@ Rust `SimulationTiming` 以 `physics_step_ns` 为权威值；Python 构造时接
 
 Apollo 规格的质心相对机体系原点约偏移 `(0, 2.013, 0) m`，所以状态字段不会把二者简称为同一个“位置”。整数 `control_tick` 与 `physics_tick` 是权威时间源。
 
-JSONL 第一行是 `TrajectoryHeader`，包含格式版本、模型、时序和 reset 后的 tick 0 `initial_snapshot`；后续每行是调用方明确选择记录的 `TelemetryFrame`。姿态持久字段固定为 `quaternion_body_to_world_wxyz`，不继承 Rust 数学库的内部序列化顺序。
+JSONL 第一行是 `TrajectoryHeader`，包含格式版本、模型、时序和 reset 后的 tick 0 `initial_snapshot`；后续每行是调用方明确选择记录的 `TelemetryFrame`。调用方还可在 header 和帧中附加可选期望姿态，plant 本身不知道控制目标。姿态持久字段固定为显式 `wxyz` 顺序，不继承 Rust 数学库的内部序列化顺序。
 
 ## 当前模型边界
 
@@ -182,7 +194,9 @@ JSONL 第一行是 `TrajectoryHeader`，包含格式版本、模型、时序和 
 ## 文档与验证
 
 - [架构与依赖边界](docs/architecture.md)
+- [Rust 与 Python API 参考手册](docs/api-reference.md)
 - [Rust、Python、记录与回放用法](docs/usage.md)
+- [可运行例程索引](examples/README.md)
 - [构建、测试与开发约定](docs/development.md)
 - [四元数姿态控制推导](docs/quaternion_attitude_control.md)
 - [RCS 控制分配后续计划](docs/rcs_thruster_allocation_dynamics_todo.md)

@@ -89,7 +89,8 @@ read snapshot
     -> repeat
 ```
 
-仓库中的 Rust/Python 控制器都只存在于例程中，不是公共库 API。运行两个例程：
+仓库中的 Rust/Python 控制器都只存在于根目录的
+[例程区](../examples/README.md)，不是公共库 API。运行两个例程：
 
 ```bash
 source scripts/mujoco_env.zsh
@@ -97,8 +98,22 @@ cargo run -p apollo-mujoco --example closed_loop_attitude
 
 conda activate cybernetic_env
 source scripts/mujoco_env.zsh
-python python/examples/closed_loop_attitude.py
+python examples/python/closed_loop_attitude.py
 ```
+
+例程在姿态环之外组合了一个低增益、限加速度的质心位置/速度 PD 环。它先用模型的
+质心偏置把“机体系原点状态”换算为“质心状态”，在世界系计算定点合力，再旋转回
+plant 要求的机体系表达。不要直接把非零角速度与零原点线速度组合为“静止”初态：
+
+```text
+p_com = p_origin + R_body_to_world r_com_body
+v_com = v_origin + omega_world x (R_body_to_world r_com_body)
+```
+
+若希望初始质心静止，应设置
+`v_origin = -omega_world x (R_body_to_world r_com_body)`。Rust 从
+`factory.model_spec()`、Python 从 `factory.model_spec` 取得质量和质心偏置；位置环与
+这个初态换算都只属于调用方例程。
 
 它们分别生成：
 
@@ -145,15 +160,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let factory = ApolloPlantFactory::apollo_touchdown()?;
     let mut plant = factory.spawn(ApolloState::ZERO)?;
     let initial_snapshot = plant.snapshot();
+    let desired_attitude = ApolloState::ZERO.body_to_world;
 
     create_dir_all("runs")?;
     let output = BufWriter::new(File::create("runs/my_run.jsonl")?);
-    let header = TrajectoryHeader::apollo(plant.timing(), initial_snapshot);
+    let header = TrajectoryHeader::apollo(plant.timing(), initial_snapshot)
+        .with_initial_desired_attitude(desired_attitude);
     let mut writer = JsonlTrajectoryWriter::new(output, header)?;
 
     for _ in 0..500 {
         let step = plant.step(BodyWrench::ZERO)?;
-        writer.write_frame(&TelemetryFrame::from(step))?;
+        writer.write_frame(
+            &TelemetryFrame::from(step).with_desired_attitude(desired_attitude),
+        )?;
     }
     writer.get_mut().flush()?;
 
@@ -161,7 +180,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-`TrajectoryHeader` v1 必须包含 reset 后、任何动作执行前的 tick 0 `initial_snapshot`。viewer 因而从 `t=0` 显示真实初态，而不是从第一个动作后的状态开始。
+`TrajectoryHeader` v1 必须包含 reset 后、任何动作执行前的 tick 0 `initial_snapshot`。viewer 因而从 `t=0` 显示真实初态，而不是从第一个动作后的状态开始。`initial_attitude_reference` 与每帧的 `attitude_reference` 都是调用方可选遥测，不会进入 plant API；固定目标应在 header 和每帧都写入，时变目标则逐帧写入当时的期望姿态。
 
 ## Python：显式记录轨迹
 
@@ -180,14 +199,20 @@ from apollo_sim import (
 initial_state = ApolloState.identity()
 plant = ApolloPlantFactory().spawn(initial_state)
 initial_snapshot = plant.snapshot()
+desired_wxyz = [1.0, 0.0, 0.0, 0.0]
 
 path = Path("runs/my_python_run.jsonl")
 path.parent.mkdir(parents=True, exist_ok=True)
 with path.open("w", encoding="utf-8") as stream:
-    writer = JsonlTrajectoryWriter(stream, initial_snapshot, plant.timing)
+    writer = JsonlTrajectoryWriter(
+        stream,
+        initial_snapshot,
+        plant.timing,
+        initial_desired_attitude_wxyz=desired_wxyz,
+    )
     for _ in range(500):
         step = plant.step(BodyWrench.zero())
-        writer.write_step(step)
+        writer.write_step(step, desired_attitude_wxyz=desired_wxyz)
 ```
 
 两种 writer 都只记录调用方明确提交的 step。连续记录时，viewer 可以显示每个控制区间的 requested/applied wrench。若只记录每隔若干 tick 的稀疏帧，帧间状态会用于视觉插值，但中间 action 无法从端点恢复；viewer 会显示 `unknown`，不会把某个已记录 action 错误延长到整段。
@@ -200,6 +225,8 @@ with path.open("w", encoding="utf-8") as stream:
 cargo run -p apollo-viewer --bin apollo-replay -- runs/closed_loop_attitude.jsonl
 cargo run -p apollo-viewer --bin apollo-replay -- runs/python_closed_loop_attitude.jsonl
 ```
+
+回放画面右侧叠加期望姿态与当前姿态：粗实线为调用方记录的期望姿态，细半透明线为 plant 当前姿态。没有记录目标的旧轨迹仍可读取，但粗实线会隐藏，状态栏显示 `desired attitude unavailable`。
 
 CI 或跨语言契约检查无需打开窗口：
 

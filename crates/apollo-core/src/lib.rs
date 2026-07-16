@@ -25,7 +25,7 @@ pub use state::{
 };
 pub use timing::{APOLLO_PHYSICS_STEP_NS, APOLLO_SUBSTEPS_PER_CONTROL, SimulationTiming};
 pub use trajectory::{
-    APOLLO_TELEMETRY_MODEL, JsonlTrajectoryWriter, TELEMETRY_FORMAT, TELEMETRY_FORMAT_VERSION,
-    TelemetryFrame, TelemetryFrameError, TrajectoryHeader, TrajectoryHeaderError,
-    TrajectoryWriteError,
+    APOLLO_TELEMETRY_MODEL, AttitudeReference, JsonlTrajectoryWriter, TELEMETRY_FORMAT,
+    TELEMETRY_FORMAT_VERSION, TelemetryFrame, TelemetryFrameError, TrajectoryHeader,
+    TrajectoryHeaderError, TrajectoryWriteError,
 };

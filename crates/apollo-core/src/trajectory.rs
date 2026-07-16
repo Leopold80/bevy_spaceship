@@ -1,4 +1,8 @@
-use crate::{BodyWrench, PlantSnapshot, PlantStep, SimulationTiming, ValidationError};
+use crate::{
+    BodyWrench, PlantSnapshot, PlantStep, SimulationTiming, ValidationError,
+    validate_unit_quaternion,
+};
+use glam::DQuat;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
@@ -10,6 +14,37 @@ pub const TELEMETRY_FORMAT: &str = "apollo-telemetry-jsonl";
 pub const TELEMETRY_FORMAT_VERSION: u32 = 1;
 /// 当前轨迹格式中由 Apollo viewer 支持的模型标识。
 pub const APOLLO_TELEMETRY_MODEL: &str = "apollo_lander";
+
+/// 由调用方提供、供回放器显示的期望姿态。
+///
+/// 这不是 plant 状态，也不是控制器接口的一部分。控制律或策略可以选择把它
+/// 附加到遥测上；viewer 只有在数据存在且有效时才显示期望姿态坐标系。
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AttitudeReference {
+    /// 从期望机体系旋转到世界系的单位四元数。
+    #[serde(
+        rename = "quaternion_desired_body_to_world_wxyz",
+        with = "crate::state::dquat_wxyz"
+    )]
+    pub desired_body_to_world: DQuat,
+}
+
+impl AttitudeReference {
+    /// 创建一个期望姿态引用。
+    pub const fn new(desired_body_to_world: DQuat) -> Self {
+        Self {
+            desired_body_to_world,
+        }
+    }
+
+    /// 校验期望姿态是有限单位四元数。
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        validate_unit_quaternion(
+            self.desired_body_to_world,
+            "quaternion_desired_body_to_world_wxyz",
+        )
+    }
+}
 
 /// JSONL 轨迹的首行。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -24,6 +59,9 @@ pub struct TrajectoryHeader {
     pub timing: SimulationTiming,
     /// reset 后、任何动作执行前的零 tick 快照。
     pub initial_snapshot: PlantSnapshot,
+    /// tick 0 的可选期望姿态；缺失表示调用方没有记录该信息。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_attitude_reference: Option<AttitudeReference>,
 }
 
 impl TrajectoryHeader {
@@ -35,7 +73,14 @@ impl TrajectoryHeader {
             model: APOLLO_TELEMETRY_MODEL.to_owned(),
             timing,
             initial_snapshot,
+            initial_attitude_reference: None,
         }
+    }
+
+    /// 为 tick 0 附加调用方的期望姿态。
+    pub fn with_initial_desired_attitude(mut self, desired_body_to_world: DQuat) -> Self {
+        self.initial_attitude_reference = Some(AttitudeReference::new(desired_body_to_world));
+        self
     }
 
     /// 拒绝未知格式、版本、模型或无效的初始快照。
@@ -55,6 +100,11 @@ impl TrajectoryHeader {
             .state
             .validate()
             .map_err(TrajectoryHeaderError::InvalidInitialState)?;
+        if let Some(reference) = self.initial_attitude_reference {
+            reference
+                .validate()
+                .map_err(TrajectoryHeaderError::InvalidInitialAttitudeReference)?;
+        }
         if self.initial_snapshot.control_tick != 0 || self.initial_snapshot.physics_tick != 0 {
             return Err(TrajectoryHeaderError::InitialSnapshotNotAtZero {
                 control_tick: self.initial_snapshot.control_tick,
@@ -76,6 +126,8 @@ pub enum TrajectoryHeaderError {
     UnsupportedModel(String),
     /// 初始状态包含无效数值。
     InvalidInitialState(ValidationError),
+    /// tick 0 的期望姿态不是有效单位四元数。
+    InvalidInitialAttitudeReference(ValidationError),
     /// 初始快照不是 reset 后的零 tick 状态。
     InitialSnapshotNotAtZero {
         control_tick: u64,
@@ -98,6 +150,9 @@ impl fmt::Display for TrajectoryHeaderError {
             Self::InvalidInitialState(error) => {
                 write!(formatter, "invalid initial trajectory state: {error}")
             }
+            Self::InvalidInitialAttitudeReference(error) => {
+                write!(formatter, "invalid initial attitude reference: {error}")
+            }
             Self::InitialSnapshotNotAtZero {
                 control_tick,
                 physics_tick,
@@ -112,7 +167,9 @@ impl fmt::Display for TrajectoryHeaderError {
 impl Error for TrajectoryHeaderError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::InvalidInitialState(error) => Some(error),
+            Self::InvalidInitialState(error) | Self::InvalidInitialAttitudeReference(error) => {
+                Some(error)
+            }
             Self::UnsupportedFormat(_)
             | Self::UnsupportedVersion(_)
             | Self::UnsupportedModel(_)
@@ -237,9 +294,18 @@ pub struct TelemetryFrame {
     pub requested_action: BodyWrench,
     /// 后端实际应用的动作。
     pub applied_action: BodyWrench,
+    /// 本 tick 的可选期望姿态；缺失表示调用方没有记录该信息。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attitude_reference: Option<AttitudeReference>,
 }
 
 impl TelemetryFrame {
+    /// 为本帧附加调用方的期望姿态。
+    pub fn with_desired_attitude(mut self, desired_body_to_world: DQuat) -> Self {
+        self.attitude_reference = Some(AttitudeReference::new(desired_body_to_world));
+        self
+    }
+
     /// 校验数值、四元数和该帧相对轨迹时序的 tick 对齐关系。
     pub fn validate(&self, timing: SimulationTiming) -> Result<(), TelemetryFrameError> {
         self.snapshot
@@ -252,6 +318,11 @@ impl TelemetryFrame {
         self.applied_action
             .validate()
             .map_err(TelemetryFrameError::InvalidAppliedAction)?;
+        if let Some(reference) = self.attitude_reference {
+            reference
+                .validate()
+                .map_err(TelemetryFrameError::InvalidAttitudeReference)?;
+        }
 
         let expected_physics_tick = timing
             .physics_ticks_for_control_ticks(self.snapshot.control_tick)
@@ -275,6 +346,7 @@ pub enum TelemetryFrameError {
     InvalidState(ValidationError),
     InvalidRequestedAction(ValidationError),
     InvalidAppliedAction(ValidationError),
+    InvalidAttitudeReference(ValidationError),
     TickOverflow {
         control_tick: u64,
     },
@@ -294,6 +366,9 @@ impl fmt::Display for TelemetryFrameError {
             }
             Self::InvalidAppliedAction(error) => {
                 write!(formatter, "invalid applied action: {error}")
+            }
+            Self::InvalidAttitudeReference(error) => {
+                write!(formatter, "invalid attitude reference: {error}")
             }
             Self::TickOverflow { control_tick } => {
                 write!(
@@ -318,7 +393,8 @@ impl Error for TelemetryFrameError {
         match self {
             Self::InvalidState(error)
             | Self::InvalidRequestedAction(error)
-            | Self::InvalidAppliedAction(error) => Some(error),
+            | Self::InvalidAppliedAction(error)
+            | Self::InvalidAttitudeReference(error) => Some(error),
             Self::TickOverflow { .. } | Self::MisalignedPhysicsTick { .. } => None,
         }
     }
@@ -330,6 +406,7 @@ impl From<PlantStep> for TelemetryFrame {
             snapshot: step.snapshot,
             requested_action: step.requested_action,
             applied_action: step.applied_action,
+            attitude_reference: None,
         }
     }
 }
@@ -358,7 +435,8 @@ mod tests {
 
     #[test]
     fn header_and_frame_round_trip_through_json() {
-        let header = test_header();
+        let desired = DQuat::from_xyzw(0.5, 0.5, 0.5, 0.5);
+        let header = test_header().with_initial_desired_attitude(desired);
         let header_json = serde_json::to_string(&header).unwrap();
         let decoded_header: TrajectoryHeader = serde_json::from_str(&header_json).unwrap();
         assert_eq!(decoded_header, header);
@@ -372,10 +450,42 @@ mod tests {
             },
             requested_action: BodyWrench::ZERO,
             applied_action: BodyWrench::ZERO,
-        };
+            attitude_reference: None,
+        }
+        .with_desired_attitude(desired);
         let frame_json = serde_json::to_string(&frame).unwrap();
         let decoded_frame: TelemetryFrame = serde_json::from_str(&frame_json).unwrap();
         assert_eq!(decoded_frame, frame);
+    }
+
+    #[test]
+    fn optional_attitude_reference_is_backward_compatible_and_validated() {
+        let legacy_header_json = serde_json::to_string(&test_header()).unwrap();
+        let decoded: TrajectoryHeader = serde_json::from_str(&legacy_header_json).unwrap();
+        assert!(decoded.initial_attitude_reference.is_none());
+
+        let mut invalid_header = test_header();
+        invalid_header.initial_attitude_reference =
+            Some(AttitudeReference::new(DQuat::from_xyzw(0.0, 0.0, 0.0, 2.0)));
+        assert!(matches!(
+            invalid_header.validate(),
+            Err(TrajectoryHeaderError::InvalidInitialAttitudeReference(_))
+        ));
+
+        let invalid_frame = TelemetryFrame {
+            snapshot: PlantSnapshot {
+                state: ApolloState::ZERO,
+                control_tick: 1,
+                physics_tick: 10,
+            },
+            requested_action: BodyWrench::ZERO,
+            applied_action: BodyWrench::ZERO,
+            attitude_reference: Some(AttitudeReference::new(DQuat::from_xyzw(0.0, 0.0, 0.0, 0.0))),
+        };
+        assert!(matches!(
+            invalid_frame.validate(SimulationTiming::APOLLO),
+            Err(TelemetryFrameError::InvalidAttitudeReference(_))
+        ));
     }
 
     #[test]
@@ -423,6 +533,7 @@ mod tests {
             },
             requested_action: BodyWrench::ZERO,
             applied_action: BodyWrench::ZERO,
+            attitude_reference: None,
         };
         writer.write_frame(&frame).unwrap();
 
@@ -467,6 +578,7 @@ mod tests {
             },
             requested_action: BodyWrench::ZERO,
             applied_action: BodyWrench::ZERO,
+            attitude_reference: None,
         };
         writer.write_frame(&first).unwrap();
 

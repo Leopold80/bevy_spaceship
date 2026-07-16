@@ -1,6 +1,7 @@
 """Apollo MuJoCo 被控对象的 Python API。"""
 
 from ._api import (
+    ApolloModelSpec,
     ApolloPlant,
     ApolloPlantFactory,
     ApolloState,
@@ -12,6 +13,7 @@ from ._api import (
 )
 
 __all__ = [
+    "ApolloModelSpec",
     "ApolloPlant",
     "ApolloPlantFactory",
     "ApolloState",

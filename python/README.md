@@ -42,6 +42,8 @@ for _ in range(100):
 ```
 
 `step()` 恰好推进一个控制周期，不创建线程，也不按照 wall clock 等待。当前 API 不包含 Gym、reward、episode 或闭环 runner。
+`factory.model_spec` 提供只读的 `mass_kg`、`center_of_mass_body_m` 和
+`diagonal_inertia_body_kg_m2`，供调用方控制律和状态换算使用。
 
 ## ndarray 策略适配
 
@@ -87,6 +89,10 @@ wrench = [force_body_n(3), torque_about_com_body_nm(3)]
 - `force_body_n` 在机体系表达，等效作用于质心。
 - `torque_about_com_body_nm` 是关于质心、在机体系表达的力矩。
 
+非零角速度时，零机体系原点速度不代表质心静止。若 `r_com_world` 是由姿态旋转后的
+质心偏置，则 `v_com = v_origin + omega_world x r_com_world`。仓库的 Python 闭环例程
+使用这个关系构造零质心速度初态，并在调用方增加一个限幅的质心定点 PD 环。
+
 Python `SimulationTiming` 构造时接收 `physics_step_seconds`，但物理步长必须能由正整数纳秒表示。`physics_step_ns` 是与 Rust/JSONL 一致的权威整数值；默认值为 2,000,000 ns，`substeps_per_control` 默认为 10。
 
 ## 显式记录与回放
@@ -106,22 +112,30 @@ from apollo_sim import (
 initial_state = ApolloState.identity()
 plant = ApolloPlantFactory().spawn(initial_state)
 initial_snapshot = plant.snapshot()
+desired_wxyz = [1.0, 0.0, 0.0, 0.0]
 
 path = Path("runs/my_python_run.jsonl")
 path.parent.mkdir(parents=True, exist_ok=True)
 with path.open("w", encoding="utf-8") as stream:
-    writer = JsonlTrajectoryWriter(stream, initial_snapshot, plant.timing)
+    writer = JsonlTrajectoryWriter(
+        stream,
+        initial_snapshot,
+        plant.timing,
+        initial_desired_attitude_wxyz=desired_wxyz,
+    )
     for _ in range(100):
         step = plant.step(BodyWrench.zero())
-        writer.write_step(step)
+        writer.write_step(step, desired_attitude_wxyz=desired_wxyz)
 ```
 
-初始快照写在 JSONL header 中，回放因此从 `t=0` 开始。writer 只记录调用方明确提交的 step；若调用方稀疏记录，未记录控制区间的 action 不可恢复，viewer 会显示 `unknown`。
+初始快照写在 JSONL header 中，回放因此从 `t=0` 开始。期望姿态是调用方可选遥测：提供时粗实线显示期望姿态、细半透明线显示当前姿态；不提供时 viewer 隐藏粗实线。writer 只记录调用方明确提交的 step；若调用方稀疏记录，未记录控制区间的 action 不可恢复，viewer 会显示 `unknown`。
 
-完整 Python 控制例程及其回放：
+完整 Python 控制例程位于仓库根目录的
+[`examples/python/closed_loop_attitude.py`](../examples/python/closed_loop_attitude.py)。
+逐项接口说明见 [API 参考手册](../docs/api-reference.md)。运行及回放：
 
 ```bash
-python python/examples/closed_loop_attitude.py
+python examples/python/closed_loop_attitude.py
 cargo run -p apollo-viewer --bin apollo-replay -- runs/python_closed_loop_attitude.jsonl
 cargo run -p apollo-viewer --bin apollo-replay -- --validate-only runs/python_closed_loop_attitude.jsonl
 ```

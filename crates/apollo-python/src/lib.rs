@@ -15,6 +15,7 @@ use pyo3::prelude::*;
 
 type NativeSnapshot = (Vec<f64>, u64, u64);
 type NativeStep = (NativeSnapshot, Vec<f64>, Vec<f64>);
+type NativeModelSpec = (String, f64, Vec<f64>, Vec<f64>);
 
 #[pyclass(name = "ApolloPlantFactory", unsendable)]
 struct PyApolloPlantFactory {
@@ -35,6 +36,17 @@ impl PyApolloPlantFactory {
         let state = state_from_vector(&initial_state)?;
         let inner = self.inner.spawn(state).map_err(map_plant_error)?;
         Ok(PyApolloPlant { inner })
+    }
+
+    /// 返回位置控制、执行器分配等调用方算法需要的只读模型参数。
+    fn model_spec(&self) -> NativeModelSpec {
+        let spec = self.inner.model_spec();
+        (
+            spec.name.to_owned(),
+            spec.mass_kg,
+            spec.center_of_mass_body_m.to_array().to_vec(),
+            spec.diagonal_inertia_body_kg_m2.to_array().to_vec(),
+        )
     }
 }
 

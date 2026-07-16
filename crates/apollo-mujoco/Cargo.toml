@@ -9,3 +9,7 @@ apollo-core = { path = "../apollo-core" }
 glam.workspace = true
 mujoco_rs = { package = "mujoco-rs", version = "5.0.0", default-features = false }
 thiserror.workspace = true
+
+[[example]]
+name = "closed_loop_attitude"
+path = "../../examples/rust/closed_loop_attitude.rs"
