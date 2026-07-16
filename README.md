@@ -1,149 +1,199 @@
-# Bevy Spacecraft
+# Apollo Plant API
 
-基于 Bevy 的飞船强化学习/控制系统仿真可视化环境。当前版本包含 Apollo 风格登月舱资源、零重力 Apollo 外形单刚体 6DoF 姿态控制实验、四元数姿态误差计算、运动学姿态控制律、日志验证和可视化演示。
+这是一个面向控制律、制导律和强化学习算法的 Apollo 风格被控对象。动力学由 MuJoCo 提供；Rust 与 Python 调用同一份 Rust plant 实现；Bevy 负责模型查看、离线轨迹回放以及一个可选的 live 组合例程。
 
-工程目标是把算法数学与 Bevy 场景细节分开：控制律和误差计算应能被控制/RL 实验直接调用，飞船造型资源应能单独查看和维护，演示程序则负责把二者组合成可视化验证环境。
+公共边界是同步、显式的 plant：
 
-## 运行入口
+```text
+explicit initial state -> spawn/reset -> snapshot
+explicit body wrench   -> step        -> step result
+```
 
-项目通过 `rust-toolchain.toml` 固定使用 Rust 1.95.0。当前 `mujoco-rs` 是无条件依赖，因此即使只运行 Bevy 模型查看器或运动学姿态演示，在终端执行 Cargo 命令前也需要从仓库根目录加载 MuJoCo 链接环境。
+plant 内部没有控制器、目标、奖励、episode、线程、sleep 或 viewer。仓库也不提供公共 `ClosedLoopRunner`；调用方直接写循环，自己决定控制律、记录频率、并行方式和实时节拍。
 
-只查看 Apollo 风格登月舱模型和基础场景：
+## Workspace
+
+```text
+apollo-core      状态、动作、时序、模型规格、版本化遥测
+apollo-mujoco    MuJoCo plant 与 Rust API
+apollo-python    同一 plant 的 PyO3 绑定
+apollo-viewer    Apollo 模型查看、JSONL 离线回放与可选 live 例程
+```
+
+完整依赖方向和禁止边界见[架构说明](docs/architecture.md)。除非特别说明，下面的仓库命令都从仓库根目录执行。
+
+## Rust API
+
+在另一个 Rust 工程中使用本地 checkout 时，先按实际相对位置加入 path dependency：
+
+```toml
+[dependencies]
+apollo-mujoco = { path = "../bevy_spaceship/crates/apollo-mujoco" }
+```
+
+若还要使用版本化轨迹 writer，再加入：
+
+```toml
+apollo-core = { path = "../bevy_spaceship/crates/apollo-core" }
+```
+
+下面是可以直接放入调用方 `src/main.rs` 的最小程序：
+
+```rust
+use apollo_mujoco::{ApolloPlantFactory, ApolloState, BodyWrench, PlantError};
+
+fn user_algorithm(_state: ApolloState) -> BodyWrench {
+    // 在这里替换为控制律、制导律或策略输出。
+    BodyWrench::ZERO
+}
+
+fn main() -> Result<(), PlantError> {
+    let factory = ApolloPlantFactory::apollo_touchdown()?;
+    let mut plant = factory.spawn(ApolloState::ZERO)?;
+    let mut snapshot = plant.snapshot();
+
+    for _ in 0..500 {
+        let action = user_algorithm(snapshot.state);
+        snapshot = plant.step(action)?.snapshot;
+    }
+
+    Ok(())
+}
+```
+
+每次 `step()` 恰好推进一个控制周期。默认时间基准为 2 ms 物理步长、每个动作保持 10 个物理小步，即 20 ms 控制周期。
+
+仓库内的手写闭环例程会生成 `runs/closed_loop_attitude.jsonl`：
 
 ```bash
 source scripts/mujoco_env.zsh
-cargo run --bin model_viewer
+cargo run -p apollo-mujoco --example closed_loop_attitude
 ```
 
-运行四元数姿态控制可视化演示：
+## Python API
+
+本机直接复用现有 `cybernetic_env`，不需要新建环境。首次构建或原生代码变化后运行：
+
+```bash
+conda activate cybernetic_env
+source scripts/mujoco_env.zsh
+maturin develop
+pytest python/tests
+```
+
+此后每个新 shell 在使用 Python plant 前仍须执行：
+
+```bash
+conda activate cybernetic_env
+source scripts/mujoco_env.zsh
+```
+
+不要用 `conda run` 代替上述顺序；macOS 会过滤子进程的 `DYLD_LIBRARY_PATH`，导致扩展找不到仓库内的 MuJoCo framework。
+
+Python 接口不是 Gym 环境。`spawn()` 要求显式初始状态；策略使用 ndarray 时，通过公开的向量转换方法接入：
+
+```python
+import numpy as np
+
+from apollo_sim import ApolloPlantFactory, ApolloState, BodyWrench
+
+
+def policy(observation: np.ndarray) -> np.ndarray:
+    # 返回 [force_body_n(3), torque_about_com_body_nm(3)]。
+    return np.zeros(6, dtype=np.float64)
+
+
+initial_state = ApolloState.identity()
+plant = ApolloPlantFactory().spawn(initial_state)
+snapshot = plant.snapshot()
+
+for _ in range(500):
+    observation = snapshot.state.as_vector()
+    action = BodyWrench.from_vector(policy(observation))
+    snapshot = plant.step(action).snapshot
+```
+
+Python 领域对象是 frozen dataclass，向量数组以 `numpy.float64` 保存并默认设为只读；这是防止误改的 API 约定，不是不可绕过的安全边界。
+
+完整 Python 闭环例程会生成 `runs/python_closed_loop_attitude.jsonl`：
+
+```bash
+python python/examples/closed_loop_attitude.py
+```
+
+## 可视化
+
+模型查看器不依赖 MuJoCo：
+
+```bash
+cargo run -p apollo-viewer --bin apollo-model-viewer
+```
+
+Rust 和 Python 例程生成的轨迹都可以离线回放：
+
+```bash
+cargo run -p apollo-viewer --bin apollo-replay -- runs/closed_loop_attitude.jsonl
+cargo run -p apollo-viewer --bin apollo-replay -- runs/python_closed_loop_attitude.jsonl
+```
+
+按键：`Space` 播放/暂停，`R` 回到开头，左右方向键按控制 tick 单步，上下方向键调整速度。轨迹 header 保存 reset 后的 tick 0 初始快照，因此回放从 `t=0` 开始。若调用方只稀疏记录帧，未记录控制区间的 action 无法恢复，viewer 会显示 `unknown`，不会伪造 wrench。
+
+只做无窗口格式与契约校验：
+
+```bash
+cargo run -p apollo-viewer --bin apollo-replay -- --validate-only runs/closed_loop_attitude.jsonl
+cargo run -p apollo-viewer --bin apollo-replay -- --validate-only runs/python_closed_loop_attitude.jsonl
+```
+
+实时闭环只是一项应用层组合例程，不是库内 runner：
 
 ```bash
 source scripts/mujoco_env.zsh
-cargo run --bin attitude_demo
+cargo run -p apollo-viewer --features live --bin apollo-live-example
 ```
 
-运行 MuJoCo Apollo 外形单刚体 6DoF 姿态控制演示：
+live 例程初始处于暂停状态：`Space` 继续/暂停，`R` 重置并保持暂停，暂停时按右方向键推进一个控制 tick。
+
+## 数据契约
+
+公共数值统一为 `f64`。本项目采用右手坐标系；单位姿态时机体系与世界系重合，Apollo 模型的 `+X` 向右、`+Y` 向上、`+Z` 向前。`body_to_world` 是把机体系向量主动旋转到世界系的单位四元数。
+
+| 语义 | Rust 字段 | Python / JSON 字段 | 单位或顺序 |
+|---|---|---|---|
+| 机体系原点的世界系位置 | `position_body_origin_world_m` | `position_body_origin_world_m` | m |
+| 机体系到世界系姿态 | `body_to_world` | `quaternion_body_to_world_wxyz` | wxyz |
+| 机体系原点的世界系线速度 | `linear_velocity_body_origin_world_mps` | `linear_velocity_body_origin_world_mps` | m/s |
+| 机体系角速度 | `angular_velocity_body_radps` | `angular_velocity_body_radps` | rad/s |
+| 在机体系表达、等效作用于质心的力 | `force_body_n` | `force_body_n` | N |
+| 关于质心、在机体系表达的力矩 | `torque_about_com_body_nm` | `torque_about_com_body_nm` | N·m |
+
+Rust `SimulationTiming` 以 `physics_step_ns` 为权威值；Python 构造时接收 `physics_step_seconds`，但同样规范化为可由整数纳秒精确表示的步长，并通过 `physics_step_ns` 暴露权威值。
+
+Apollo 规格的质心相对机体系原点约偏移 `(0, 2.013, 0) m`，所以状态字段不会把二者简称为同一个“位置”。整数 `control_tick` 与 `physics_tick` 是权威时间源。
+
+JSONL 第一行是 `TrajectoryHeader`，包含格式版本、模型、时序和 reset 后的 tick 0 `initial_snapshot`；后续每行是调用方明确选择记录的 `TelemetryFrame`。姿态持久字段固定为 `quaternion_body_to_world_wxyz`，不继承 Rust 数学库的内部序列化顺序。
+
+## 当前模型边界
+
+当前模型是 Apollo 外形和着陆工况质量属性的零重力 freejoint 单刚体、理想六维 wrench 基线。质量为 4932 kg，项目坐标轴下的对角惯量为 `(6332, 7953, 5879) kg·m²`。数据取自 [NASA NTRS 20260000331](https://ntrs.nasa.gov/citations/20260000331) 的 Table 1 “Apollo 11 actual light touchdown”列，并按本项目轴顺序转换。
+
+它尚不包含月球重力、月面接触、DPS/APS/RCS、推进剂消耗或变质量，因此不能当作高保真 Apollo 登月舱飞行模型。理想 wrench 接口会继续保留，用于区分控制算法问题与执行器/分配问题；后续 RCS 通过独立命令和分配层扩展，不把喷口语义塞进当前动作类型。
+
+## 文档与验证
+
+- [架构与依赖边界](docs/architecture.md)
+- [Rust、Python、记录与回放用法](docs/usage.md)
+- [构建、测试与开发约定](docs/development.md)
+- [四元数姿态控制推导](docs/quaternion_attitude_control.md)
+- [RCS 控制分配后续计划](docs/rcs_thruster_allocation_dynamics_todo.md)
+
+Rust 验证：
 
 ```bash
+cargo test -p apollo-core
+cargo test -p apollo-viewer
 source scripts/mujoco_env.zsh
-cargo run --bin mujoco_apollo_demo
+cargo test -p apollo-mujoco
 ```
 
-默认入口仍然指向姿态控制演示，因此下面的旧命令也可用：
-
-```bash
-source scripts/mujoco_env.zsh
-cargo run
-```
-
-## 四元数姿态控制演示
-
-姿态控制演示用于验证如下简化的运动学外环控制律：
-
-```text
-q_e = q_d^-1 * q
-if q_e0 < 0, q_e = -q_e
-omega_c = -kp * q_ev
-```
-
-该实现有意只建模运动学部分。它不包含刚体动力学、转动惯量、执行器力矩、饱和约束，也不包含内层角速度控制环。
-
-当前运动学演示和 MuJoCo 级联控制器都只使用常增益
-`omega_c = -kp * q_ev` 反馈。`q_e0 q_ev` 缩放反馈仅保留在
-`attitude_control::legacy` 中作为理论和回归对照，不再进入任何运行时控制路径。
-
-可视化演示中的控制按键：
-
-- `Space` 或 `R`：重置当前场景。
-- `1`、`2`、`3`：在几个可重复的初始姿态场景之间切换。
-- `P`：暂停或继续收敛过程。
-
-右侧叠加显示区域会在同一个原点处显示两个坐标系：
-
-- 粗坐标系：期望姿态 `q_d`。
-- 半透明细坐标系：当前姿态 `q`。
-
-随着控制器收敛，当前坐标系应逐渐与期望坐标系重合。
-
-## MuJoCo Apollo 外形单刚体实验
-
-MuJoCo 实验使用 `mujoco-rs`，macOS 下启用了 `renderer-winit-fallback`，并在 `Cargo.toml` 中 patch 了 `glutin`。当前仓库已跟踪 MuJoCo 3.9.0 的 macOS framework 和动态库，位置为：
-
-```text
-.local/mujoco/3.9.0/macos/
-```
-
-目录结构包含：
-
-```text
-.local/mujoco/3.9.0/macos/mujoco.framework/
-.local/mujoco/3.9.0/macos/libmujoco.dylib
-.local/mujoco/3.9.0/macos/libmujoco.3.9.0.dylib
-```
-
-其中两个 dylib 路径均为指向 framework 内实际动态库的符号链接：
-
-```text
-mujoco.framework/Versions/A/libmujoco.3.9.0.dylib
-```
-
-仓库的 `.vscode/settings.json` 已为 rust-analyzer 配置等效的 MuJoCo 链接环境，因此 VS Code 内部的 `cargo check` / `cargo clippy` 不需要额外手动 source 脚本。终端中的 Cargo 构建、运行和测试则应先从仓库根目录执行 `source scripts/mujoco_env.zsh`。
-
-两端共用 `src/apollo_spec.rs` 中的 Apollo 部件表。Bevy 遍历全部部件生成可视外形；MuJoCo MJCF 只使用其中标记了物理质量的部件作为外形子集，整机惯性属性另由显式 `<inertial>` 指定。当前 MuJoCo 被控对象是零重力、一个 freejoint 的单刚体，接口接收 body-frame 6D 外力/力矩；默认姿态控制器只输出力矩。它尚不包含月球重力、月面接触、DPS/APS/RCS 执行器、推进剂消耗或变质量。
-固定质量属性采用 NASA Apollo 11 实际轻载着陆工况：整机 `4932 kg`，项目轴 `X右/Y上/Z前` 下的对角惯量为 `(6332, 7953, 5879) kg·m²`。
-
-当前 MuJoCo Apollo 外形单刚体 demo 默认运行双层姿态控制：
-
-```text
-outer loop: q_e -> omega_c                 # 复用四元数运动学姿态控制律
-inner loop: omega_c - omega_body -> tau    # PI-D 角速度环输出 body-frame 力矩
-plant:      J * omega_dot + omega x Jomega = tau, integrated by MuJoCo
-```
-
-也就是说，内环不再直接改运动学姿态积分，而是向 MuJoCo freejoint 刚体施加力矩。当前内环对角速度误差使用 PI，D 项作用于测量角速度微分，另有显式角速度阻尼、回算抗积分饱和和幅值限制。`R` 会重置 MuJoCo 状态和内环积分/微分历史。
-
-### 坐标系约定与挑战收敛场景
-
-MuJoCo freejoint 的位置、姿态和线速度在世界系中表达，`qvel[3..6]` 旋转速度则已在刚体局部坐标系中表达。`ApolloDynamicsState::angular_velocity` 因此明确表示机体系角速度，内环直接使用它计算误差，不再做姿态逆旋转。
-
-为了不让坐标系错误被“恒等姿态到单轴目标”这个特例掩盖，MuJoCo demo 现在从固定的非恒等姿态和非零机体系角速度出发，两者轴向故意不对齐；按 `R` 也会恢复这个挑战初始状态。测试除了检查最终姿态与角速度收敛，还限定 2 s 时的短时收敛误差；恢复旧的重复旋转后，该短时验收会失败。另一个轴向测试检查在目标等于当前姿态时，单一机体系角速度必须产生同轴反向阻尼力矩。
-
-## 固定步长控制架构
-
-MuJoCo 仿真、控制器更新和 Bevy 渲染现在已经解耦：
-
-```text
-MuJoCo simulation dt:   0.002 s
-Controller dt:          0.020 s
-Control hold:           10 steps
-```
-
-`ApolloControlEnv` 每个控制周期只更新一次控制器，并将得到的 wrench 保持 10 个 MuJoCo 固定步长。`SharedApolloState` 在独立仿真线程中推进环境并发布快照；`mujoco_apollo_demo` 的 Bevy 系统只读取最新快照并同步可视模型，不使用渲染帧的 `delta time` 推进物理状态。因此 GPU 负载或窗口刷新率只影响画面刷新，不改变控制器和 MuJoCo 的离散时间基准。
-
-当前仍未提供独立的 MuJoCo headless 实验入口和 MuJoCo CSV 日志。下一阶段的 RCS 喷口模拟、可视化及相平面控制 baseline 见下方 TODO 文档。
-
-## 文档索引
-
-- [四元数姿态控制推导与工程验证](docs/quaternion_attitude_control.md)
-- [RCS 喷口模拟、可视化与相平面控制 baseline TODO](docs/rcs_thruster_allocation_dynamics_todo.md)
-
-## 无图形界面日志验证
-
-当前 headless 日志只验证简化的四元数运动学姿态控制，不运行 MuJoCo，也不是 RCS 或双层动力学实验。运行命令为：
-
-```bash
-source scripts/mujoco_env.zsh
-cargo run --bin attitude_demo -- --headless-log
-```
-
-程序固定仿真 8 秒，运动学积分步长为 `1/60 s`，每 `0.1 s` 记录一次，并覆盖写入：
-
-```text
-logs/attitude_kinematics.csv
-```
-
-CSV 列为：
-
-```text
-time_s,qe0,qev_norm,error_angle_rad,omega_norm,omega_x,omega_y,omega_z
-```
+完整验证命令见[开发说明](docs/development.md)。

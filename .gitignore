@@ -1,4 +1,9 @@
 /target/
 /logs/*.csv
+/runs/
+/.venv/
+/.pytest_cache/
+**/__pycache__/
+*.py[cod]
+/python/apollo_sim/_apollo_native*.so
 .DS_Store
-

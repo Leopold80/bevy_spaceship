@@ -1,13 +1,13 @@
-use crate::apollo_spec::{ApolloMaterial, ApolloPart, ApolloShape, apollo_parts};
+use apollo_core::{ApolloMaterial, ApolloShape, ApolloVisualPart, apollo_visual_parts};
 use bevy::math::primitives::{Cuboid, Cylinder, Sphere};
 use bevy::prelude::*;
 
 pub struct LanderMaterials {
-    pub gold: Handle<StandardMaterial>,
-    pub foil: Handle<StandardMaterial>,
-    pub metal: Handle<StandardMaterial>,
-    pub dark: Handle<StandardMaterial>,
-    pub white: Handle<StandardMaterial>,
+    gold: Handle<StandardMaterial>,
+    foil: Handle<StandardMaterial>,
+    metal: Handle<StandardMaterial>,
+    dark: Handle<StandardMaterial>,
+    white: Handle<StandardMaterial>,
 }
 
 pub fn create_lander_materials(materials: &mut Assets<StandardMaterial>) -> LanderMaterials {
@@ -54,7 +54,7 @@ pub fn spawn_lander(
     let lander = commands.spawn((transform, Visibility::default())).id();
 
     commands.entity(lander).with_children(|parent| {
-        for part in apollo_parts() {
+        for part in apollo_visual_parts() {
             spawn_apollo_part(parent, meshes, materials, part);
         }
     });
@@ -66,45 +66,55 @@ fn spawn_apollo_part(
     parent: &mut ChildSpawnerCommands,
     meshes: &mut Assets<Mesh>,
     materials: &LanderMaterials,
-    part: ApolloPart,
+    part: ApolloVisualPart,
 ) {
     let material = apollo_material(materials, part.material);
+    let transform = part_transform(part);
+
     match part.shape {
-        ApolloShape::Cuboid { size } => {
+        ApolloShape::Cuboid { size_m } => {
             parent.spawn((
-                Mesh3d(meshes.add(Cuboid::from_size(size))),
+                Mesh3d(meshes.add(Cuboid::from_size(dvec3(size_m)))),
                 MeshMaterial3d(material),
-                part.visual_transform(),
+                transform,
             ));
         }
         ApolloShape::Cylinder {
-            radius,
-            height,
+            radius_m,
+            height_m,
             resolution,
         } => {
             parent.spawn((
-                Mesh3d(meshes.add(Cylinder::new(radius, height).mesh().resolution(resolution))),
+                Mesh3d(
+                    meshes.add(
+                        Cylinder::new(radius_m as f32, height_m as f32)
+                            .mesh()
+                            .resolution(resolution),
+                    ),
+                ),
                 MeshMaterial3d(material),
-                part.visual_transform(),
+                transform,
             ));
         }
-        ApolloShape::Sphere { radius } => {
+        ApolloShape::Sphere { radius_m } => {
             parent.spawn((
-                Mesh3d(meshes.add(Sphere::new(radius).mesh().uv(16, 8))),
+                Mesh3d(meshes.add(Sphere::new(radius_m as f32).mesh().uv(16, 8))),
                 MeshMaterial3d(material),
-                part.visual_transform(),
+                transform,
             ));
         }
         ApolloShape::Strut {
-            start,
-            end,
-            radius,
+            start_body_m,
+            end_body_m,
+            radius_m,
             resolution,
         } => {
+            let start = dvec3(start_body_m);
+            let end = dvec3(end_body_m);
             spawn_cylinder_between(
                 parent,
                 meshes.add(
-                    Cylinder::new(radius, start.distance(end))
+                    Cylinder::new(radius_m as f32, start.distance(end))
                         .mesh()
                         .resolution(resolution),
                 ),
@@ -114,6 +124,12 @@ fn spawn_apollo_part(
             );
         }
     }
+}
+
+fn part_transform(part: ApolloVisualPart) -> Transform {
+    Transform::from_translation(dvec3(part.translation_body_m))
+        .with_rotation(dquat(part.rotation_part_to_body))
+        .with_scale(dvec3(part.scale))
 }
 
 fn apollo_material(
@@ -136,13 +152,40 @@ fn spawn_cylinder_between(
     start: Vec3,
     end: Vec3,
 ) {
-    let midpoint = (start + end) * 0.5;
     let delta = end - start;
     let rotation = Quat::from_rotation_arc(Vec3::Y, delta.normalize());
-
     parent.spawn((
         Mesh3d(mesh),
         MeshMaterial3d(material),
-        Transform::from_translation(midpoint).with_rotation(rotation),
+        Transform::from_translation((start + end) * 0.5).with_rotation(rotation),
     ));
+}
+
+pub fn dvec3(value: glam::DVec3) -> Vec3 {
+    Vec3::new(value.x as f32, value.y as f32, value.z as f32)
+}
+
+pub fn dquat(value: glam::DQuat) -> Quat {
+    Quat::from_xyzw(
+        value.x as f32,
+        value.y as f32,
+        value.z as f32,
+        value.w as f32,
+    )
+    .normalize()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apollo_core::ApolloState;
+
+    #[test]
+    fn f64_pose_conversion_preserves_identity_and_axes() {
+        assert_eq!(
+            dvec3(glam::DVec3::new(1.0, -2.0, 3.0)),
+            Vec3::new(1.0, -2.0, 3.0)
+        );
+        assert!(dquat(ApolloState::ZERO.body_to_world).dot(Quat::IDENTITY) > 1.0 - 1.0e-6);
+    }
 }

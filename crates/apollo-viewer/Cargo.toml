@@ -1,0 +1,30 @@
+[package]
+name = "apollo-viewer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+live = ["dep:apollo-mujoco"]
+
+[dependencies]
+apollo-core = { path = "../apollo-core" }
+apollo-mujoco = { path = "../apollo-mujoco", optional = true }
+bevy = "0.19"
+glam.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[[bin]]
+name = "apollo-model-viewer"
+path = "src/bin/model_viewer.rs"
+
+[[bin]]
+name = "apollo-replay"
+path = "src/bin/replay.rs"
+
+[[bin]]
+name = "apollo-live-example"
+path = "src/bin/live_example.rs"
+required-features = ["live"]

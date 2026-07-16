@@ -1,13 +1,24 @@
-[package]
-name = "bevy_spacecraft"
+[workspace]
+members = [
+    "crates/apollo-core",
+    "crates/apollo-mujoco",
+    "crates/apollo-python",
+    "crates/apollo-viewer",
+]
+default-members = [
+    "crates/apollo-core",
+    "crates/apollo-mujoco",
+    "crates/apollo-viewer",
+]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-default-run = "bevy_spacecraft"
+rust-version = "1.95"
 
-[dependencies]
-bevy = "0.19"
-glam = "0.32.1"
-mujoco_rs = { package = "mujoco-rs", version = "5.0.0", features = ["viewer-ui", "renderer-winit-fallback"] }
-
-[patch.crates-io]
-glutin = { git = "https://github.com/davidhozic/glutin", rev = "e95fe97f1857c0498ed2236c0e8d60e5a30a2854" }
+[workspace.dependencies]
+glam = { version = "0.32.1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
