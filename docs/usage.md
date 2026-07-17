@@ -77,6 +77,62 @@ for _ in range(500):
 
 Python 领域对象是 frozen dataclass，数组为 `numpy.float64` 且默认只读。该设计用于尽早发现意外修改，不应理解为安全隔离；拥有底层数组的调用方仍可主动改变 NumPy write flag。
 
+## 直接驱动 RCS 与 DPS
+
+推进器接口与理想 wrench 接口是两个 plant，不需要切换全局模式。Rust 最小例程：
+
+```rust
+use apollo_mujoco::{
+    ApolloPropulsionPlantFactory, ApolloState, DpsCommand,
+    PropulsionCommand, RcsCommand, RcsThrusterId,
+};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let factory = ApolloPropulsionPlantFactory::apollo11_touchdown()?;
+    let mut plant = factory.spawn(ApolloState::ZERO)?;
+    let step = plant.step(PropulsionCommand {
+        rcs: RcsCommand::single_pulse(RcsThrusterId::new(0).unwrap(), 14_000_000),
+        dps: DpsCommand::Off,
+    })?;
+    println!("{:?}", step.applied.rcs[0]);
+    Ok(())
+}
+```
+
+Python 对应写法：
+
+```python
+from apollo_sim import (
+    ApolloPropulsionPlantFactory, ApolloState, DpsCommand,
+    PropulsionCommand, RcsCommand, RcsThrusterId,
+)
+
+plant = ApolloPropulsionPlantFactory.apollo11_touchdown().spawn(
+    ApolloState.identity()
+)
+step = plant.step(PropulsionCommand(
+    rcs=RcsCommand.single_pulse(RcsThrusterId.A1U, 14_000_000),
+    dps=DpsCommand.off(),
+))
+print(step.applied.rcs.mean_thrust_n)
+```
+
+直接运行两种语言的完整小例程：
+
+```bash
+source scripts/mujoco_env.zsh
+cargo run -p apollo-mujoco --example propulsion_pulse
+python examples/python/propulsion_pulse.py
+```
+
+16 路顺序、最小脉冲、DPS 三种档位、requested/applied 字段和周期语义见
+[推进系统说明](apollo_propulsion_system.md)与 [API 参考](api-reference.md)。
+
+DPS 摆角命令是目标角，不是瞬时实际角。目标先限制到 6° 圆锥，GDA 再按 `0.2°/s`
+在每个物理子步追踪；默认一个 20 ms `step()` 最多移动 `0.004°`。应从
+`step.applied.dps` 读取周期末实际角。`Off` 令推力为零但保持最后摆角，`reset` 才回中；
+不需要为这项执行机构动态修改默认 2 ms × 10 时序。
+
 ## 自己实现闭环
 
 闭环只是普通调用方循环：
@@ -217,6 +273,9 @@ with path.open("w", encoding="utf-8") as stream:
 
 两种 writer 都只记录调用方明确提交的 step。连续记录时，viewer 可以显示每个控制区间的 requested/applied wrench。若只记录每隔若干 tick 的稀疏帧，帧间状态会用于视觉插值，但中间 action 无法从端点恢复；viewer 会显示 `unknown`，不会把某个已记录 action 错误延长到整段。
 
+JSONL v1 只接受理想 wrench 的 `PlantStep`；推进器 `PropulsionStep` 暂无 v2 schema，不能
+交给当前 writer。
+
 ## 离线校验与回放
 
 两种语言的轨迹都可交给同一个 viewer：
@@ -240,9 +299,30 @@ cargo run -p apollo-viewer --bin apollo-replay -- --validate-only runs/python_cl
 ```bash
 source scripts/mujoco_env.zsh
 cargo run -p apollo-viewer --features live --bin apollo-live-example
+cargo run -p apollo-viewer --features live --bin apollo-propulsion-demo
 ```
 
-live 例程启动后默认暂停，确保窗口出现时仍显示显式初态。`Space` 继续或暂停；`R` reset 并保持暂停；暂停时右方向键只推进一个控制 tick。线程、wall-clock 节拍和控制器都只属于这个二进制例程，没有进入 plant API。
+第一个 live 例程启动后默认暂停，确保窗口出现时仍显示显式初态；第二个提供 RCS/DPS
+人工点火界面并用实际 applied 输出显示尾焰与 DPS 周期末实际摆角，而不是直接显示键盘
+请求的目标角。推进 demo 键位为：
+
+| 键位 | 行为 |
+|---|---|
+| `Space` | 继续或暂停 |
+| `R` | reset、全关闭并保持暂停；GDA 回中 |
+| `Right` | 暂停时推进一个 20 ms 控制 tick |
+| `Tab` | 切换单喷口、纯力矩偶和 DPS 模式 |
+| `[` / `]` | 选择上一/下一喷口或力矩偶 |
+| `Enter` | 排队一次 14 ms RCS 脉冲；DPS 模式忽略 |
+| 按住 `F` | 连续请求当前 RCS 喷口或力矩偶 |
+| `I` | DPS 开/关 |
+| `Up` / `Down` | 以 525 lbf 档距调整 DPS 目标推力，最高另设 9,870 lbf 全推力档 |
+| `A` / `D` | GDA 目标朝 `-X/+X` 调整 0.5° |
+| `W` / `S` | GDA 目标朝 `+Z/-Z` 调整 0.5° |
+| `0` / `Backspace` | 全关闭；GDA 保持最后实际角 |
+
+0.5° 是界面目标档距，不是单 tick 实际移动量；GDA 仍按 `0.2°/s` 追踪。线程、
+wall-clock 节拍和控制器都只属于这些二进制例程，没有进入 plant API。
 
 ## 后续 Gym 适配
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from enum import Enum, IntEnum
 from typing import Sequence, TextIO
 
 import numpy as np
@@ -19,7 +20,9 @@ else:
 
 
 FloatVector = NDArray[np.float64]
+UInt64Vector = NDArray[np.uint64]
 _QUATERNION_NORM_TOLERANCE = 1.0e-9
+_RCS_THRUSTER_COUNT = 16
 
 
 def _readonly_vector(name: str, value: ArrayLike, length: int) -> FloatVector:
@@ -38,6 +41,49 @@ def _readonly_vector(name: str, value: ArrayLike, length: int) -> FloatVector:
     owned = np.array(array, dtype=np.float64, copy=True)
     owned.setflags(write=False)
     return owned
+
+
+def _readonly_uint64_vector(
+    name: str, value: ArrayLike, length: int
+) -> UInt64Vector:
+    """校验无符号整数向量，避免 NumPy 静默截断浮点数或回绕负数。"""
+
+    try:
+        array = np.asarray(value, dtype=object)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must contain integers") from exc
+
+    if array.shape != (length,):
+        raise ValueError(f"{name} must have shape ({length},), got {array.shape}")
+
+    converted: list[int] = []
+    for item in array:
+        if isinstance(item, (bool, np.bool_)) or not isinstance(
+            item, (int, np.integer)
+        ):
+            raise ValueError(f"{name} must contain integers")
+        integer = int(item)
+        if integer < 0 or integer > np.iinfo(np.uint64).max:
+            raise ValueError(
+                f"{name} values must fit an unsigned 64-bit integer"
+            )
+        converted.append(integer)
+
+    owned = np.array(converted, dtype=np.uint64)
+    owned.setflags(write=False)
+    return owned
+
+
+def _finite_float(name: str, value: float) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a real number")
+    try:
+        converted = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a real number") from exc
+    if not np.isfinite(converted):
+        raise ValueError(f"{name} must be finite")
+    return converted
 
 
 def _non_negative_integer(name: str, value: int) -> int:
@@ -179,6 +225,457 @@ class BodyWrench:
         return isinstance(other, BodyWrench) and bool(
             np.array_equal(self.as_vector(), other.as_vector())
         )
+
+
+class RcsThrusterId(IntEnum):
+    """Apollo LM Operations Handbook 的稳定 RCS 喷口标签与数组索引。"""
+
+    A1U = 0
+    B1D = 1
+    A1F = 2
+    B1L = 3
+    B2U = 4
+    A2D = 5
+    A2A = 6
+    B2L = 7
+    A3U = 8
+    B3D = 9
+    B3A = 10
+    A3R = 11
+    B4U = 12
+    A4D = 13
+    B4F = 14
+    A4R = 15
+
+
+RCS_THRUSTER_ORDER: tuple[RcsThrusterId, ...] = tuple(RcsThrusterId)
+
+
+class RcsQuad(IntEnum):
+    """四个 RCS quad 的稳定编号。"""
+
+    QUAD_1 = 1
+    QUAD_2 = 2
+    QUAD_3 = 3
+    QUAD_4 = 4
+
+
+class RcsFeedSystem(str, Enum):
+    """喷口所属的两套独立推进剂供给系统。"""
+
+    A = "A"
+    B = "B"
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class RcsThrusterSpec:
+    """单个 RCS 喷口的后端中立几何、分组和执行器规格。"""
+
+    id: RcsThrusterId
+    label: str
+    quad: RcsQuad
+    feed_system: RcsFeedSystem
+    position_body_m: FloatVector
+    force_direction_body: FloatVector
+    steady_thrust_n: float
+    minimum_pulse_ns: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, RcsThrusterId):
+            raise ValueError("id must be an RcsThrusterId")
+        if not isinstance(self.label, str) or not self.label:
+            raise ValueError("label must be a non-empty string")
+        if not isinstance(self.quad, RcsQuad):
+            raise ValueError("quad must be an RcsQuad")
+        if not isinstance(self.feed_system, RcsFeedSystem):
+            raise ValueError("feed_system must be an RcsFeedSystem")
+
+        position = _readonly_vector(
+            "position_body_m", self.position_body_m, 3
+        )
+        direction = _readonly_vector(
+            "force_direction_body", self.force_direction_body, 3
+        )
+        direction_norm = float(np.linalg.norm(direction))
+        if abs(direction_norm - 1.0) > _QUATERNION_NORM_TOLERANCE:
+            raise ValueError("force_direction_body must be a unit vector")
+        thrust_n = _finite_float("steady_thrust_n", self.steady_thrust_n)
+        if thrust_n <= 0.0:
+            raise ValueError("steady_thrust_n must be positive")
+        minimum_pulse_ns = _non_negative_integer(
+            "minimum_pulse_ns", self.minimum_pulse_ns
+        )
+        if minimum_pulse_ns == 0:
+            raise ValueError("minimum_pulse_ns must be positive")
+        object.__setattr__(self, "position_body_m", position)
+        object.__setattr__(self, "force_direction_body", direction)
+        object.__setattr__(self, "steady_thrust_n", thrust_n)
+        object.__setattr__(self, "minimum_pulse_ns", minimum_pulse_ns)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, RcsThrusterSpec)
+            and self.id is other.id
+            and self.label == other.label
+            and self.quad is other.quad
+            and self.feed_system is other.feed_system
+            and bool(np.array_equal(self.position_body_m, other.position_body_m))
+            and bool(
+                np.array_equal(
+                    self.force_direction_body, other.force_direction_body
+                )
+            )
+            and self.steady_thrust_n == other.steady_thrust_n
+            and self.minimum_pulse_ns == other.minimum_pulse_ns
+        )
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class RcsCommand:
+    """16 路 RCS 阀门请求时长，均从当前控制周期起点计时。"""
+
+    on_time_ns: UInt64Vector
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "on_time_ns",
+            _readonly_uint64_vector(
+                "on_time_ns", self.on_time_ns, _RCS_THRUSTER_COUNT
+            ),
+        )
+
+    @classmethod
+    def all_off(cls) -> RcsCommand:
+        """返回所有 RCS 喷口关闭的命令。"""
+
+        return cls(np.zeros(_RCS_THRUSTER_COUNT, dtype=np.uint64))
+
+    @classmethod
+    def single_thruster(cls, thruster_index: int, on_time_ns: int) -> RcsCommand:
+        """只请求一个喷口；索引范围固定为 0..15。"""
+
+        index = _non_negative_integer("thruster_index", thruster_index)
+        if index >= _RCS_THRUSTER_COUNT:
+            raise ValueError(
+                f"thruster_index must be in [0, {_RCS_THRUSTER_COUNT - 1}]"
+            )
+        duration = _non_negative_integer("on_time_ns", on_time_ns)
+        values = np.zeros(_RCS_THRUSTER_COUNT, dtype=np.uint64)
+        values[index] = duration
+        return cls(values)
+
+    @classmethod
+    def single_pulse(
+        cls, thruster: RcsThrusterId, on_time_ns: int
+    ) -> RcsCommand:
+        """按稳定 Apollo 喷口标签请求单路脉冲。"""
+
+        if not isinstance(thruster, RcsThrusterId):
+            raise ValueError("thruster must be an RcsThrusterId")
+        return cls.single_thruster(int(thruster), on_time_ns)
+
+    def as_vector(self) -> UInt64Vector:
+        """返回固定喷口顺序的只读 ``numpy.uint64`` 向量。"""
+
+        copied = np.array(self.on_time_ns, dtype=np.uint64, copy=True)
+        copied.setflags(write=False)
+        return copied
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, RcsCommand) and bool(
+            np.array_equal(self.on_time_ns, other.on_time_ns)
+        )
+
+
+class DpsMode(str, Enum):
+    """Apollo 下降级主发动机的离散工作方式。"""
+
+    OFF = "off"
+    VARIABLE = "variable"
+    FULL_THRUST = "full_thrust"
+
+
+@dataclass(frozen=True, slots=True)
+class DpsCommand:
+    """下降推进系统命令；力和两个摆角均使用显式 SI 单位。"""
+
+    mode: DpsMode
+    thrust_n: float | None = None
+    gimbal_x_rad: float = 0.0
+    gimbal_z_rad: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mode, DpsMode):
+            raise ValueError("mode must be a DpsMode")
+
+        gimbal_x_rad = _finite_float("gimbal_x_rad", self.gimbal_x_rad)
+        gimbal_z_rad = _finite_float("gimbal_z_rad", self.gimbal_z_rad)
+        object.__setattr__(self, "gimbal_x_rad", gimbal_x_rad)
+        object.__setattr__(self, "gimbal_z_rad", gimbal_z_rad)
+
+        if self.mode is DpsMode.VARIABLE:
+            if self.thrust_n is None:
+                raise ValueError("VARIABLE mode requires thrust_n")
+            thrust_n = _finite_float("thrust_n", self.thrust_n)
+            if thrust_n <= 0.0:
+                raise ValueError("thrust_n must be positive in VARIABLE mode")
+            object.__setattr__(self, "thrust_n", thrust_n)
+        elif self.thrust_n is not None:
+            raise ValueError("thrust_n is only valid in VARIABLE mode")
+
+        if self.mode is DpsMode.OFF and (
+            gimbal_x_rad != 0.0 or gimbal_z_rad != 0.0
+        ):
+            raise ValueError("OFF mode requires zero gimbal angles")
+
+    @classmethod
+    def off(cls) -> DpsCommand:
+        return cls(mode=DpsMode.OFF)
+
+    @classmethod
+    def variable(
+        cls,
+        thrust_n: float,
+        *,
+        gimbal_x_rad: float = 0.0,
+        gimbal_z_rad: float = 0.0,
+    ) -> DpsCommand:
+        return cls(
+            mode=DpsMode.VARIABLE,
+            thrust_n=thrust_n,
+            gimbal_x_rad=gimbal_x_rad,
+            gimbal_z_rad=gimbal_z_rad,
+        )
+
+    @classmethod
+    def full_thrust(
+        cls, *, gimbal_x_rad: float = 0.0, gimbal_z_rad: float = 0.0
+    ) -> DpsCommand:
+        return cls(
+            mode=DpsMode.FULL_THRUST,
+            gimbal_x_rad=gimbal_x_rad,
+            gimbal_z_rad=gimbal_z_rad,
+        )
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class DpsSpec:
+    """Apollo 11 LM-5 下降推进系统的稳态推力与万向节规格。"""
+
+    gimbal_pivot_body_m: FloatVector
+    nominal_force_direction_body: FloatVector
+    variable_min_thrust_n: float
+    variable_max_thrust_n: float
+    full_thrust_n: float
+    maximum_gimbal_rad: float
+    gimbal_rate_rad_s: float
+
+    def __post_init__(self) -> None:
+        pivot = _readonly_vector(
+            "gimbal_pivot_body_m", self.gimbal_pivot_body_m, 3
+        )
+        direction = _readonly_vector(
+            "nominal_force_direction_body",
+            self.nominal_force_direction_body,
+            3,
+        )
+        if (
+            abs(float(np.linalg.norm(direction)) - 1.0)
+            > _QUATERNION_NORM_TOLERANCE
+        ):
+            raise ValueError("nominal_force_direction_body must be a unit vector")
+
+        variable_min = _finite_float(
+            "variable_min_thrust_n", self.variable_min_thrust_n
+        )
+        variable_max = _finite_float(
+            "variable_max_thrust_n", self.variable_max_thrust_n
+        )
+        full_thrust = _finite_float("full_thrust_n", self.full_thrust_n)
+        maximum_gimbal = _finite_float(
+            "maximum_gimbal_rad", self.maximum_gimbal_rad
+        )
+        gimbal_rate = _finite_float(
+            "gimbal_rate_rad_s", self.gimbal_rate_rad_s
+        )
+        if not (0.0 < variable_min < variable_max < full_thrust):
+            raise ValueError(
+                "DPS thrusts must satisfy 0 < variable_min < variable_max "
+                "< full_thrust"
+            )
+        if maximum_gimbal <= 0.0:
+            raise ValueError("maximum_gimbal_rad must be positive")
+        if gimbal_rate <= 0.0:
+            raise ValueError("gimbal_rate_rad_s must be positive")
+        object.__setattr__(self, "gimbal_pivot_body_m", pivot)
+        object.__setattr__(self, "nominal_force_direction_body", direction)
+        object.__setattr__(self, "variable_min_thrust_n", variable_min)
+        object.__setattr__(self, "variable_max_thrust_n", variable_max)
+        object.__setattr__(self, "full_thrust_n", full_thrust)
+        object.__setattr__(self, "maximum_gimbal_rad", maximum_gimbal)
+        object.__setattr__(self, "gimbal_rate_rad_s", gimbal_rate)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, DpsSpec)
+            and bool(
+                np.array_equal(
+                    self.gimbal_pivot_body_m, other.gimbal_pivot_body_m
+                )
+            )
+            and bool(
+                np.array_equal(
+                    self.nominal_force_direction_body,
+                    other.nominal_force_direction_body,
+                )
+            )
+            and self.variable_min_thrust_n == other.variable_min_thrust_n
+            and self.variable_max_thrust_n == other.variable_max_thrust_n
+            and self.full_thrust_n == other.full_thrust_n
+            and self.maximum_gimbal_rad == other.maximum_gimbal_rad
+            and self.gimbal_rate_rad_s == other.gimbal_rate_rad_s
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ApolloPropulsionSpec:
+    """RCS 16 路稳定顺序与 DPS 规格的只读集合。"""
+
+    rcs_thrusters: tuple[RcsThrusterSpec, ...]
+    dps: DpsSpec
+
+    def __post_init__(self) -> None:
+        thrusters = tuple(self.rcs_thrusters)
+        if len(thrusters) != _RCS_THRUSTER_COUNT:
+            raise ValueError(
+                f"rcs_thrusters must contain {_RCS_THRUSTER_COUNT} entries"
+            )
+        if not all(isinstance(spec, RcsThrusterSpec) for spec in thrusters):
+            raise ValueError("rcs_thrusters must contain RcsThrusterSpec values")
+        ids = tuple(spec.id for spec in thrusters)
+        if ids != RCS_THRUSTER_ORDER:
+            raise ValueError("rcs_thrusters must follow RCS_THRUSTER_ORDER")
+        if not isinstance(self.dps, DpsSpec):
+            raise ValueError("dps must be a DpsSpec")
+        object.__setattr__(self, "rcs_thrusters", thrusters)
+
+
+@dataclass(frozen=True, slots=True)
+class PropulsionCommand:
+    """一个控制周期内的 RCS 与下降推进系统联合命令。"""
+
+    rcs: RcsCommand
+    dps: DpsCommand
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.rcs, RcsCommand):
+            raise ValueError("rcs must be an RcsCommand")
+        if not isinstance(self.dps, DpsCommand):
+            raise ValueError("dps must be a DpsCommand")
+
+    @classmethod
+    def all_off(cls) -> PropulsionCommand:
+        return cls(rcs=RcsCommand.all_off(), dps=DpsCommand.off())
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class AppliedRcs:
+    """RCS 执行器实际门控时长和控制周期平均推力。"""
+
+    applied_gate_on_time_ns: UInt64Vector
+    mean_thrust_n: FloatVector
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "applied_gate_on_time_ns",
+            _readonly_uint64_vector(
+                "applied_gate_on_time_ns",
+                self.applied_gate_on_time_ns,
+                _RCS_THRUSTER_COUNT,
+            ),
+        )
+        mean_thrust_n = _readonly_vector(
+            "mean_thrust_n", self.mean_thrust_n, _RCS_THRUSTER_COUNT
+        )
+        if np.any(mean_thrust_n < 0.0):
+            raise ValueError("mean_thrust_n must be non-negative")
+        object.__setattr__(self, "mean_thrust_n", mean_thrust_n)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, AppliedRcs)
+            and bool(
+                np.array_equal(
+                    self.applied_gate_on_time_ns,
+                    other.applied_gate_on_time_ns,
+                )
+            )
+            and bool(np.array_equal(self.mean_thrust_n, other.mean_thrust_n))
+        )
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class AppliedDps:
+    """DPS 在一个控制周期内实际采用的模式、推力、摆角和受力方向。"""
+
+    mode: DpsMode
+    thrust_n: float
+    gimbal_x_rad: float
+    gimbal_z_rad: float
+    force_direction_body: FloatVector
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mode, DpsMode):
+            raise ValueError("mode must be a DpsMode")
+        thrust_n = _finite_float("thrust_n", self.thrust_n)
+        if thrust_n < 0.0:
+            raise ValueError("thrust_n must be non-negative")
+        object.__setattr__(self, "thrust_n", thrust_n)
+        object.__setattr__(
+            self, "gimbal_x_rad", _finite_float("gimbal_x_rad", self.gimbal_x_rad)
+        )
+        object.__setattr__(
+            self, "gimbal_z_rad", _finite_float("gimbal_z_rad", self.gimbal_z_rad)
+        )
+        direction = _readonly_vector(
+            "force_direction_body", self.force_direction_body, 3
+        )
+        if abs(float(np.linalg.norm(direction)) - 1.0) > _QUATERNION_NORM_TOLERANCE:
+            raise ValueError("force_direction_body must be a unit vector")
+        object.__setattr__(self, "force_direction_body", direction)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, AppliedDps)
+            and self.mode is other.mode
+            and self.thrust_n == other.thrust_n
+            and self.gimbal_x_rad == other.gimbal_x_rad
+            and self.gimbal_z_rad == other.gimbal_z_rad
+            and bool(
+                np.array_equal(
+                    self.force_direction_body, other.force_direction_body
+                )
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AppliedPropulsion:
+    """执行器实际输出及其控制周期平均机体系 wrench。"""
+
+    rcs: AppliedRcs
+    dps: AppliedDps
+    mean_wrench_body: BodyWrench
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.rcs, AppliedRcs):
+            raise ValueError("rcs must be an AppliedRcs")
+        if not isinstance(self.dps, AppliedDps):
+            raise ValueError("dps must be an AppliedDps")
+        if not isinstance(self.mean_wrench_body, BodyWrench):
+            raise ValueError("mean_wrench_body must be a BodyWrench")
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +825,23 @@ class PlantStep:
             raise ValueError("requested_action must be a BodyWrench")
         if not isinstance(self.applied_action, BodyWrench):
             raise ValueError("applied_action must be a BodyWrench")
+
+
+@dataclass(frozen=True, slots=True)
+class PropulsionStep:
+    """推进器命令执行一个控制周期后的完整结果。"""
+
+    snapshot: PlantSnapshot
+    requested_command: PropulsionCommand
+    applied: AppliedPropulsion
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.snapshot, PlantSnapshot):
+            raise ValueError("snapshot must be a PlantSnapshot")
+        if not isinstance(self.requested_command, PropulsionCommand):
+            raise ValueError("requested_command must be a PropulsionCommand")
+        if not isinstance(self.applied, AppliedPropulsion):
+            raise ValueError("applied must be an AppliedPropulsion")
 
 
 def _validated_state_copy(state: ApolloState) -> ApolloState:
@@ -554,6 +1068,154 @@ def _snapshot_from_native(raw: tuple[Sequence[float], int, int]) -> PlantSnapsho
     )
 
 
+def _dps_command_to_native(
+    command: DpsCommand,
+) -> tuple[str, float | None, float, float]:
+    return (
+        command.mode.value,
+        command.thrust_n,
+        command.gimbal_x_rad,
+        command.gimbal_z_rad,
+    )
+
+
+def _dps_command_from_native(
+    raw: tuple[str, float | None, float, float],
+) -> DpsCommand:
+    mode, thrust_n, gimbal_x_rad, gimbal_z_rad = raw
+    try:
+        parsed_mode = DpsMode(mode)
+    except ValueError as exc:
+        raise RuntimeError(f"native plant returned unknown DPS mode: {mode}") from exc
+    return DpsCommand(
+        mode=parsed_mode,
+        thrust_n=thrust_n,
+        gimbal_x_rad=gimbal_x_rad,
+        gimbal_z_rad=gimbal_z_rad,
+    )
+
+
+def _propulsion_command_from_native(
+    raw: tuple[Sequence[int], tuple[str, float | None, float, float]],
+) -> PropulsionCommand:
+    rcs_on_time_ns, dps = raw
+    return PropulsionCommand(
+        rcs=RcsCommand(rcs_on_time_ns),
+        dps=_dps_command_from_native(dps),
+    )
+
+
+def _applied_propulsion_from_native(
+    raw: tuple[
+        Sequence[int],
+        Sequence[float],
+        tuple[str, float, float, float, Sequence[float]],
+        Sequence[float],
+    ],
+) -> AppliedPropulsion:
+    gate_on_time_ns, mean_thrust_n, dps_raw, mean_wrench = raw
+    mode, thrust_n, gimbal_x_rad, gimbal_z_rad, force_direction_body = dps_raw
+    try:
+        parsed_mode = DpsMode(mode)
+    except ValueError as exc:
+        raise RuntimeError(f"native plant returned unknown DPS mode: {mode}") from exc
+    return AppliedPropulsion(
+        rcs=AppliedRcs(
+            applied_gate_on_time_ns=gate_on_time_ns,
+            mean_thrust_n=mean_thrust_n,
+        ),
+        dps=AppliedDps(
+            mode=parsed_mode,
+            thrust_n=thrust_n,
+            gimbal_x_rad=gimbal_x_rad,
+            gimbal_z_rad=gimbal_z_rad,
+            force_direction_body=force_direction_body,
+        ),
+        mean_wrench_body=BodyWrench.from_vector(mean_wrench),
+    )
+
+
+def _propulsion_spec_from_native(
+    raw: tuple[
+        Sequence[
+            tuple[
+                int,
+                str,
+                int,
+                str,
+                Sequence[float],
+                Sequence[float],
+                float,
+                int,
+            ]
+        ],
+        tuple[
+            Sequence[float],
+            Sequence[float],
+            float,
+            float,
+            float,
+            float,
+            float,
+        ],
+    ],
+) -> ApolloPropulsionSpec:
+    rcs_raw, dps_raw = raw
+    thrusters: list[RcsThrusterSpec] = []
+    for (
+        id_index,
+        label,
+        quad,
+        feed_system,
+        position_body_m,
+        force_direction_body,
+        steady_thrust_n,
+        minimum_pulse_ns,
+    ) in rcs_raw:
+        try:
+            thruster_id = RcsThrusterId(id_index)
+            parsed_quad = RcsQuad(quad)
+            parsed_feed_system = RcsFeedSystem(feed_system)
+        except ValueError as exc:
+            raise RuntimeError(
+                "native plant returned an invalid RCS specification enum"
+            ) from exc
+        thrusters.append(
+            RcsThrusterSpec(
+                id=thruster_id,
+                label=label,
+                quad=parsed_quad,
+                feed_system=parsed_feed_system,
+                position_body_m=position_body_m,
+                force_direction_body=force_direction_body,
+                steady_thrust_n=steady_thrust_n,
+                minimum_pulse_ns=minimum_pulse_ns,
+            )
+        )
+
+    (
+        gimbal_pivot_body_m,
+        nominal_force_direction_body,
+        variable_min_thrust_n,
+        variable_max_thrust_n,
+        full_thrust_n,
+        maximum_gimbal_rad,
+        gimbal_rate_rad_s,
+    ) = dps_raw
+    return ApolloPropulsionSpec(
+        rcs_thrusters=tuple(thrusters),
+        dps=DpsSpec(
+            gimbal_pivot_body_m=gimbal_pivot_body_m,
+            nominal_force_direction_body=nominal_force_direction_body,
+            variable_min_thrust_n=variable_min_thrust_n,
+            variable_max_thrust_n=variable_max_thrust_n,
+            full_thrust_n=full_thrust_n,
+            maximum_gimbal_rad=maximum_gimbal_rad,
+            gimbal_rate_rad_s=gimbal_rate_rad_s,
+        ),
+    )
+
+
 class ApolloPlantFactory:
     """编译并共享只读 MuJoCo 模型，用于创建相互独立的 plant。"""
 
@@ -627,4 +1289,118 @@ class ApolloPlant:
             snapshot=_snapshot_from_native(raw_snapshot),
             requested_action=BodyWrench.from_vector(requested_action),
             applied_action=BodyWrench.from_vector(applied_action),
+        )
+
+
+class ApolloPropulsionPlantFactory:
+    """编译带 Apollo RCS 与下降推进系统的 MuJoCo plant 工厂。"""
+
+    __slots__ = (
+        "_model_spec",
+        "_native_factory",
+        "_propulsion_spec",
+        "_timing",
+    )
+
+    def __init__(self, timing: SimulationTiming | None = None) -> None:
+        selected_timing = timing if timing is not None else SimulationTiming()
+        if not isinstance(selected_timing, SimulationTiming):
+            raise ValueError("timing must be a SimulationTiming")
+
+        native = _require_native()
+        self._native_factory = native.ApolloPropulsionPlantFactory(
+            selected_timing.physics_step_seconds,
+            selected_timing.substeps_per_control,
+        )
+        name, mass_kg, center_of_mass, diagonal_inertia = (
+            self._native_factory.model_spec()
+        )
+        self._model_spec = ApolloModelSpec(
+            name=name,
+            mass_kg=mass_kg,
+            center_of_mass_body_m=center_of_mass,
+            diagonal_inertia_body_kg_m2=diagonal_inertia,
+        )
+        self._propulsion_spec = _propulsion_spec_from_native(
+            self._native_factory.propulsion_spec()
+        )
+        self._timing = selected_timing
+
+    @classmethod
+    def apollo11_touchdown(
+        cls, timing: SimulationTiming | None = None
+    ) -> ApolloPropulsionPlantFactory:
+        """构造完整、尚未分级的 Apollo 11 LM-5 RCS + DPS 工厂。"""
+
+        return cls(timing)
+
+    @property
+    def timing(self) -> SimulationTiming:
+        return self._timing
+
+    @property
+    def model_spec(self) -> ApolloModelSpec:
+        return self._model_spec
+
+    @property
+    def propulsion_spec(self) -> ApolloPropulsionSpec:
+        return self._propulsion_spec
+
+    def spawn(self, initial_state: ApolloState) -> ApolloPropulsionPlant:
+        if not isinstance(initial_state, ApolloState):
+            raise ValueError("initial_state must be an ApolloState")
+        native_plant = self._native_factory.spawn(initial_state.as_vector().tolist())
+        return ApolloPropulsionPlant(
+            native_plant, self._timing, self._propulsion_spec
+        )
+
+
+class ApolloPropulsionPlant:
+    """同步推进器 plant；每次 step 严格推进一个固定控制周期。"""
+
+    __slots__ = ("_native_plant", "_propulsion_spec", "_timing")
+
+    def __init__(
+        self,
+        native_plant: object,
+        timing: SimulationTiming,
+        propulsion_spec: ApolloPropulsionSpec,
+    ) -> None:
+        self._native_plant = native_plant
+        self._timing = timing
+        self._propulsion_spec = propulsion_spec
+
+    @property
+    def timing(self) -> SimulationTiming:
+        return self._timing
+
+    @property
+    def propulsion_spec(self) -> ApolloPropulsionSpec:
+        return self._propulsion_spec
+
+    def reset(self, state: ApolloState) -> PlantSnapshot:
+        if not isinstance(state, ApolloState):
+            raise ValueError("state must be an ApolloState")
+        return _snapshot_from_native(self._native_plant.reset(state.as_vector().tolist()))
+
+    def snapshot(self) -> PlantSnapshot:
+        return _snapshot_from_native(self._native_plant.snapshot())
+
+    def step(self, command: PropulsionCommand) -> PropulsionStep:
+        if not isinstance(command, PropulsionCommand):
+            raise ValueError("command must be a PropulsionCommand")
+        dps_mode, dps_thrust_n, gimbal_x_rad, gimbal_z_rad = (
+            _dps_command_to_native(command.dps)
+        )
+        raw_snapshot, requested_command, applied = self._native_plant.step(
+            command.rcs.as_vector().tolist(),
+            dps_mode,
+            dps_thrust_n,
+            gimbal_x_rad,
+            gimbal_z_rad,
+        )
+        return PropulsionStep(
+            snapshot=_snapshot_from_native(raw_snapshot),
+            requested_command=_propulsion_command_from_native(requested_command),
+            applied=_applied_propulsion_from_native(applied),
         )

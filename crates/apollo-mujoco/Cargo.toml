@@ -13,3 +13,7 @@ thiserror.workspace = true
 [[example]]
 name = "closed_loop_attitude"
 path = "../../examples/rust/closed_loop_attitude.rs"
+
+[[example]]
+name = "propulsion_pulse"
+path = "../../examples/rust/propulsion_pulse.rs"

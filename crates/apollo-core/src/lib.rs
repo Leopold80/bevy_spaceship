@@ -7,6 +7,7 @@
 
 mod model;
 mod plant;
+mod propulsion;
 mod state;
 mod timing;
 mod trajectory;
@@ -18,6 +19,13 @@ pub use model::{
     apollo_visual_parts, center_of_mass_body_m, total_physics_mass_kg,
 };
 pub use plant::{Plant, PlantSnapshot, PlantStep};
+pub use propulsion::{
+    ApolloPropulsionSpec, AppliedDps, AppliedPropulsion, AppliedRcsThruster, DPS_FULL_THRUST_N,
+    DPS_GIMBAL_RATE_RAD_S, DPS_MAXIMUM_GIMBAL_RAD, DPS_VARIABLE_MAX_THRUST_N,
+    DPS_VARIABLE_MIN_THRUST_N, DpsCommand, DpsMode, DpsSpec, PropulsionCommand, PropulsionStep,
+    PropulsionValidationError, RCS_MINIMUM_PULSE_NS, RCS_STEADY_THRUST_N, RCS_THRUSTER_COUNT,
+    RCS_THRUSTER_LABELS, RcsCommand, RcsFeedSystem, RcsQuad, RcsThrusterId, RcsThrusterSpec,
+};
 pub use state::{
     ApolloState, BodyWrench, UNIT_QUATERNION_NORM_TOLERANCE, ValidationError,
     normalized_quaternion, validate_finite_quaternion, validate_finite_vec3,

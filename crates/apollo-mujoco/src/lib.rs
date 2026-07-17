@@ -6,10 +6,17 @@
 mod error;
 mod mjcf;
 mod plant;
+mod propulsion;
+mod rcs_actuator;
 
 pub use apollo_core::{
-    ApolloModelSpec, ApolloState, BodyWrench, Plant, PlantSnapshot, PlantStep, SimulationTiming,
+    ApolloModelSpec, ApolloPropulsionSpec, ApolloState, AppliedDps, AppliedPropulsion,
+    AppliedRcsThruster, BodyWrench, DPS_GIMBAL_RATE_RAD_S, DpsCommand, DpsMode, DpsSpec, Plant,
+    PlantSnapshot, PlantStep, PropulsionCommand, PropulsionStep, RCS_THRUSTER_COUNT,
+    RCS_THRUSTER_LABELS, RcsCommand, RcsFeedSystem, RcsQuad, RcsThrusterId, RcsThrusterSpec,
+    SimulationTiming,
 };
 pub use error::PlantError;
 pub use mjcf::generate_apollo_mjcf;
 pub use plant::{ApolloPlant, ApolloPlantFactory};
+pub use propulsion::{ApolloPropulsionPlant, ApolloPropulsionPlantFactory};

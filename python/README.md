@@ -1,6 +1,8 @@
 # Apollo Sim Python API
 
-`apollo_sim` 是 Rust/MuJoCo plant 的薄 Python 接口。它只负责构造、重置、读取状态和施加机体系 wrench；控制律、制导律、强化学习 task、奖励和可视化均由调用方组合。
+`apollo_sim` 是 Rust/MuJoCo plant 的薄 Python 接口。它同时提供理想机体系 wrench plant
+和 Apollo 11 RCS + DPS 推进器 plant；两者都只负责构造、重置、读取状态和执行显式动作。
+控制律、制导律、强化学习 task、奖励和可视化均由调用方组合。
 
 ## 开发安装与运行环境
 
@@ -44,6 +46,39 @@ for _ in range(100):
 `step()` 恰好推进一个控制周期，不创建线程，也不按照 wall clock 等待。当前 API 不包含 Gym、reward、episode 或闭环 runner。
 `factory.model_spec` 提供只读的 `mass_kg`、`center_of_mass_body_m` 和
 `diagonal_inertia_body_kg_m2`，供调用方控制律和状态换算使用。
+
+## RCS 与 DPS 推进器调用
+
+推进器 plant 接收具名的 16 路 RCS 门控时间和 DPS 工作档，不接受调用方预先合成的
+wrench：
+
+```python
+from apollo_sim import (
+    ApolloPropulsionPlantFactory,
+    ApolloState,
+    DpsCommand,
+    PropulsionCommand,
+    RcsCommand,
+    RcsThrusterId,
+)
+
+factory = ApolloPropulsionPlantFactory.apollo11_touchdown()
+plant = factory.spawn(ApolloState.identity())
+step = plant.step(
+    PropulsionCommand(
+        rcs=RcsCommand.single_pulse(RcsThrusterId.A1F, 14_000_000),
+        dps=DpsCommand.off(),
+    )
+)
+print(step.applied.rcs.mean_thrust_n)
+print(step.applied.mean_wrench_body)
+```
+
+`factory.propulsion_spec` 给出稳定喷口顺序、站位、受力方向、100 lbf 额定推力、14 ms
+最小脉冲和 DPS 参数。DPS 命令摆角是目标值；目标先限制在 6° 圆锥内，实际 GDA 再以
+`0.2°/s` 逐物理子步追踪。默认 20 ms 控制周期最多移动 `0.004°`，因此必须从
+`step.applied.dps` 读取周期末实际角。`DpsCommand.off()` 令推力归零但保持最后摆角，
+`reset()` 才回中。
 
 ## ndarray 策略适配
 
@@ -131,7 +166,8 @@ with path.open("w", encoding="utf-8") as stream:
 初始快照写在 JSONL header 中，回放因此从 `t=0` 开始。期望姿态是调用方可选遥测：提供时粗实线显示期望姿态、细半透明线显示当前姿态；不提供时 viewer 隐藏粗实线。writer 只记录调用方明确提交的 step；若调用方稀疏记录，未记录控制区间的 action 不可恢复，viewer 会显示 `unknown`。
 
 完整 Python 控制例程位于仓库根目录的
-[`examples/python/closed_loop_attitude.py`](../examples/python/closed_loop_attitude.py)。
+[`examples/python/closed_loop_attitude.py`](../examples/python/closed_loop_attitude.py)，推进器
+最小例程位于 [`examples/python/propulsion_pulse.py`](../examples/python/propulsion_pulse.py)。
 逐项接口说明见 [API 参考手册](../docs/api-reference.md)。运行及回放：
 
 ```bash

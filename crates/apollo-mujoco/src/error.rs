@@ -25,6 +25,15 @@ pub enum PlantError {
     #[error("invalid body wrench: {0}")]
     InvalidAction(ValidationError),
 
+    #[error("invalid Apollo propulsion specification: {0}")]
+    InvalidPropulsionSpec(String),
+
+    #[error("invalid propulsion command: {0}")]
+    InvalidPropulsionCommand(String),
+
+    #[error("failed to apply a propulsion point force: {0}")]
+    ForceApplication(String),
+
     #[error("MuJoCo produced an invalid state: {0}")]
     InvalidSimulationState(ValidationError),
 

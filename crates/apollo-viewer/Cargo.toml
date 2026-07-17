@@ -28,3 +28,8 @@ path = "src/bin/replay.rs"
 name = "apollo-live-example"
 path = "src/bin/live_example.rs"
 required-features = ["live"]
+
+[[bin]]
+name = "apollo-propulsion-demo"
+path = "src/bin/propulsion_demo.rs"
+required-features = ["live"]

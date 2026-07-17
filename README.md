@@ -5,8 +5,9 @@
 公共边界是同步、显式的 plant：
 
 ```text
-explicit initial state -> spawn/reset -> snapshot
-explicit body wrench   -> step        -> step result
+explicit initial state      -> spawn/reset -> snapshot
+ideal body wrench OR
+explicit RCS + DPS command  -> step        -> step result
 ```
 
 plant 内部没有控制器、目标、奖励、episode、线程、sleep 或 viewer。仓库也不提供公共 `ClosedLoopRunner`；调用方直接写循环，自己决定控制律、记录频率、并行方式和实时节拍。
@@ -63,6 +64,31 @@ fn main() -> Result<(), PlantError> {
 
 每次 `step()` 恰好推进一个控制周期。默认时间基准为 2 ms 物理步长、每个动作保持 10 个物理小步，即 20 ms 控制周期。
 
+要直接驱动 Apollo 11 LM-5 的 16 路 RCS 与 DPS，使用独立的推进器 plant：
+
+```rust
+use apollo_mujoco::{
+    ApolloPropulsionPlantFactory, ApolloState, DpsCommand,
+    PropulsionCommand, RcsCommand, RcsThrusterId,
+};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let factory = ApolloPropulsionPlantFactory::apollo11_touchdown()?;
+    let mut plant = factory.spawn(ApolloState::ZERO)?;
+    let step = plant.step(PropulsionCommand {
+        rcs: RcsCommand::single_pulse(RcsThrusterId::new(0).unwrap(), 14_000_000),
+        dps: DpsCommand::Off,
+    })?;
+    println!("{:?}", step.applied.mean_wrench_body);
+    Ok(())
+}
+```
+
+理想 `ApolloPlant<BodyWrench>` 继续保留，便于把控制律问题与执行器/分配问题分开定位。
+`DpsCommand` 中的摆角是 GDA 目标角：目标先限制在 6° 圆锥内，实际机构再以
+`0.2°/s` 追踪。默认 20 ms 控制周期最多移动 `0.004°`；`step.applied.dps` 返回周期末
+实际角。`Off` 将推力置零但保持最后摆角，`reset` 才回中，现有 2 ms × 10 时序无需改变。
+
 仓库内的手写闭环例程源码位于
 [`examples/rust/closed_loop_attitude.rs`](examples/rust/closed_loop_attitude.rs)，会生成
 `runs/closed_loop_attitude.jsonl`：
@@ -70,6 +96,7 @@ fn main() -> Result<(), PlantError> {
 ```bash
 source scripts/mujoco_env.zsh
 cargo run -p apollo-mujoco --example closed_loop_attitude
+cargo run -p apollo-mujoco --example propulsion_pulse
 ```
 
 ## Python API
@@ -123,6 +150,7 @@ Python 领域对象是 frozen dataclass，向量数组以 `numpy.float64` 保存
 
 ```bash
 python examples/python/closed_loop_attitude.py
+python examples/python/propulsion_pulse.py
 ```
 
 ## 可视化
@@ -131,6 +159,24 @@ python examples/python/closed_loop_attitude.py
 
 ```bash
 cargo run -p apollo-viewer --bin apollo-model-viewer
+```
+
+它会显示四个 RCS quad、16 个独立喷管、Apollo 11 喷流挡板与 DPS 扩张喷管。水平喷流
+严格沿本体 `±X/±Z`，不是 quad 局部切向；它与对角 quad 的局部径向和切向各成 45°。
+12 路自由喷流避开共享简化外形件，4 路下向喷流则按实物构型有意打到导流板后向外
+排走。带 MuJoCo 的交互推进 demo 使用实际 `step.applied` 驱动尾焰与 DPS 喷管摆角：
+
+```bash
+source scripts/mujoco_env.zsh
+cargo run -p apollo-viewer --features live --bin apollo-propulsion-demo
+```
+
+固定视觉 QA 使用 `--capture-all` 生成 17 张图：8 张全景、4 张安装座近景、4 张喷流/
+导流板近景和 1 张 DPS 近景：
+
+```bash
+cargo run -p apollo-viewer --bin apollo-model-viewer -- \
+  --capture-all target/visual-qa/apollo-propulsion
 ```
 
 Rust 和 Python 例程生成的轨迹都可以离线回放：
@@ -187,14 +233,18 @@ JSONL 第一行是 `TrajectoryHeader`，包含格式版本、模型、时序和 
 
 ## 当前模型边界
 
-当前模型是 Apollo 外形和着陆工况质量属性的零重力 freejoint 单刚体、理想六维 wrench 基线。质量为 4932 kg，项目坐标轴下的对角惯量为 `(6332, 7953, 5879) kg·m²`。数据取自 [NASA NTRS 20260000331](https://ntrs.nasa.gov/citations/20260000331) 的 Table 1 “Apollo 11 actual light touchdown”列，并按本项目轴顺序转换。
+当前动力学是 Apollo 外形和着陆工况质量属性的零重力 freejoint 单刚体。质量为 4932 kg，项目坐标轴下的对角惯量为 `(6332, 7953, 5879) kg·m²`。数据取自 [NASA NTRS 20260000331](https://ntrs.nasa.gov/citations/20260000331) 的 Table 1 “Apollo 11 actual light touchdown”列，并按本项目轴顺序转换。
 
-它尚不包含月球重力、月面接触、DPS/APS/RCS、推进剂消耗或变质量，因此不能当作高保真 Apollo 登月舱飞行模型。理想 wrench 接口会继续保留，用于区分控制算法问题与执行器/分配问题；后续 RCS 通过独立命令和分配层扩展，不把喷口语义塞进当前动作类型。
+它现在提供两条并行输入路径：理想六维 wrench 基线，以及具有 Apollo 11 的 16 路 RCS
+拓扑、最小脉冲、点力站位、DPS 节流与 0.2°/s GDA 摆速约束的推进器 plant。后者仍使用
+固定 4932 kg 质量，不包含月球重力、月面接触、推进剂消耗、变质量、APS/级间分离或
+自动喷口分配器，因此不能当作完整高保真 Apollo 登月飞行模型。
 
 ## 文档与验证
 
 - [架构与依赖边界](docs/architecture.md)
 - [Rust 与 Python API 参考手册](docs/api-reference.md)
+- [Apollo 11 RCS、DPS、GDA 与本项目实现详解](docs/apollo_propulsion_system.md)
 - [Rust、Python、记录与回放用法](docs/usage.md)
 - [可运行例程索引](examples/README.md)
 - [构建、测试与开发约定](docs/development.md)
